@@ -66,26 +66,6 @@ The native settings window opens before the game. **Save** stores the launcher c
 | Gamepad | Button, trigger, stick and hat bindings; axis inversion, deadzone, saturation and vibration strength |
 | Advanced Settings | Debug tools, content unlock, racer nitro, playable traffic, Catch Up override and supported cockpit views |
 
-World draw distance accepts **1.0–4.0** times the original distance; rear mirror distance accepts **0.5–4.0**. Greater distances increase the number of visible objects and the rendering cost. **Original graphics preset** selects original texture filtering, disables MSAA and restores both distance scales to **1.0**. It does not change the display resolution or FPS limit. In live races without a pre-race Catch Up control (Quick Game express, Free Run and both event trees), Catch Up is **off by default**, even if an original scenario requests relative AI pacing. Modes with a player-accessible Catch Up choice preserve that selection, unless the Advanced Settings **Disable Catch Up** option is enabled; that option disables Catch Up in all live races. The policy is checked at race commit and track activation before AI creation. Original AI response curves and independent scripted police boosts are unchanged; demo/replay snapshots retain their recorded settings.
-
-The launcher has no separate shadow or reflection quality setting. The selected MSAA mode must be supported by the GPU for both color and depth; an unsupported selection produces a startup error.
-
-The render FPS limit accepts **0** for unlocked presentation or a cap from **1 to 1000**. The **Unlock** button also disables VSync. VSync can otherwise impose a lower presentation limit. Normal live simulation uses a **60 Hz** update schedule; replay playback follows its recorded timestep. Presentation is scheduled separately.
-
-Live steering uses elapsed time and keeps the original per-car steering range and response curves. Its feedback accounts for the car's steering-range multiplier, so a high-speed turn can return to center or reverse direction without the original small-timestep steering lock. The handling correction does not impose a render FPS cap.
-
-Delayed frames retain all outstanding simulation time. Catch-up runs in bounded batches with event polling between them, and finishes the pending updates before another blocking presentation. Driver steering and gesture animation advance once per logical update; additional render frames and camera views only sample that state. Pause keeps the world animation clock stopped.
-
-Native input retains delivered keyboard and controller transitions with their timestamps. Each logical update samples the queue at its own deadline, so catch-up steps can observe different input states after a delayed presentation. Extra render frames do not consume input. Held-button repeat uses the logical real-time clock with the original PAL/NTSC repeat delays. Focus and controller connection changes reset the affected input state at the sampled boundary. Events must still be supplied by Windows or SDL; polling cannot reconstruct a hardware transition that the device backend never delivered.
-
-The independent FPS counter measures accepted frame presentation requests over elapsed application time. It does not require debug mode. The debug HUD's **C** and **G** values describe measured CPU and GPU work; they are not the displayed frame rate. When reporting a performance problem, include the independent counter, resolution, MSAA, both distance scales, VSync/FPS limit, hardware, track, camera and the number of visible cars.
-
-On **Players**, select a controller by its device name or use automatic assignment. A saved device selection remains assigned when that device is unplugged. On **Gamepad**, select the player and action, choose **Capture**, then operate the desired control. Keyboard profiles have independent bindings but use the same Windows keyboard input stream.
-
-For local two-player play, assign both players in the launcher and select **Players: 2** in the game's Challenge setup. **Keyboard P1 + gamepad P2** provides that input assignment; the second player still needs to be enabled in the game.
-
-Playable traffic remains subject to event vehicle restrictions. Cockpit view is available only for supported single-player cars. Nitro can be assigned separately for each player. Content unlock preserves earned career progress.
-
 ## Default Player 1 keyboard controls
 
 | Action | Key |
