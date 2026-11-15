@@ -1,6 +1,6 @@
 # Need for Speed: Hot Pursuit 2 — Native PC Port
 
-Native Windows x64 port of the PlayStation 2 PAL game engine (SLES_507.31), using Vulkan graphics, XAudio2 audio and SDL2 controllers. **Original game data is required and is not included.**
+Native Windows x64 port of the PlayStation 2 PAL game engine (SLES_507.31 \ SLUS_203.62), using Vulkan graphics, XAudio2 audio and SDL2 controllers. **Original game data is required and is not included.**
 
 ## Requirements
 
