@@ -36,4 +36,30 @@ int main() {
     assert(updates==50);
     // A capped capture after a logical tick still consumes fresh pending faces.
     for(int frame=0;frame<30;++frame)assert(EcstasyAdvanceEnvironmentImages(true,true,false,1));
+
+    // A fresh capture between ticks must sample the latest completed map,
+    // rather than flash back to the snapshot from before its last update.
+    const auto renderOnly=EcstasyEnvironmentHistoryPolicy(true,true,false,0);
+    assert(renderOnly.snapshotPrevious && !renderOnly.remap);
+    const auto replay=EcstasyEnvironmentHistoryPolicy(true,false,false,0);
+    assert(!replay.snapshotPrevious && !replay.remap);
+    for(int rate : {30,60,90,120}) {
+        int current=0,history=0,oldHistory=0,last=0,oldLast=0,flashes=0,oldFlashes=0;
+        for(int frame=0;frame<rate*4;++frame) {
+            const int ticks=(frame+1)*50/rate-frame*50/rate;
+            const unsigned faces=ticks ? 1u:0u;
+            const auto policy=EcstasyEnvironmentHistoryPolicy(true,true,false,faces);
+            if(policy.snapshotPrevious)history=current;
+            // Negative control: the original code skipped this snapshot
+            // whenever no simulation/camera update coincided with capture.
+            if(EcstasyAdvanceEnvironmentImages(true,true,false,faces))oldHistory=current;
+            if(policy.remap && faces)++current;
+            const int shown=faces ? current:history;
+            const int oldShown=faces ? current:oldHistory;
+            flashes+=shown<last;oldFlashes+=oldShown<oldLast;
+            last=shown;oldLast=oldShown;
+        }
+        assert(flashes==0);
+        if(rate>50)assert(oldFlashes>0);
+    }
 }

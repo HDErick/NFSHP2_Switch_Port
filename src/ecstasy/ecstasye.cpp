@@ -9701,9 +9701,9 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         CopyHistory(0,color.image,false);
 
     }
-    const bool advanceEnvironmentImages=EcstasyAdvanceEnvironmentImages(hasFrame,frame!=nullptr,
+    const auto environmentPolicy=EcstasyEnvironmentHistoryPolicy(hasFrame,frame!=nullptr,
         frame && frame->AdvancesPresentation(),frame ? frame->CapturedEnvironmentFaces():0);
-    if(historyReaders.environment && advanceEnvironmentImages) {
+    if(historyReaders.environment && environmentPolicy.snapshotPrevious) {
         auto previousEnvironment=renderedTargets.find(14);
         if(previousEnvironment!=renderedTargets.end() && previousEnvironment->second.initialized) {
             CopyHistory(14,previousEnvironment->second.color.image,true);
@@ -10280,7 +10280,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         // Upstream 136ac47d: do not blend the persistent environment image
         // again on render-only frames. Fresh pending faces may also be
         // captured between ticks when gameplay presentation is capped.
-        if(id==14 && !advanceEnvironmentImages)return;
+        if(id==14 && !environmentPolicy.remap)return;
         const auto index=static_cast<std::size_t>(id);
         if(visited[index]==2)return;
         Require(visited[index]!=1,"Original render-target graph has a current-frame sampling cycle");

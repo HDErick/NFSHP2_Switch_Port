@@ -1127,6 +1127,16 @@ inline constexpr bool EcstasyAdvanceEnvironmentImages(bool hasPrevious,bool fres
     bool logicalTick,std::uint32_t capturedFaces) noexcept {
     return !hasPrevious || (freshFrame && (logicalTick || capturedFaces!=0));
 }
+struct EcstasyEnvironmentImagePolicy {
+    bool snapshotPrevious{},remap{};
+};
+inline constexpr EcstasyEnvironmentImagePolicy EcstasyEnvironmentHistoryPolicy(
+    bool hasPrevious,bool freshFrame,bool logicalTick,std::uint32_t capturedFaces) noexcept {
+    // Snapshot the latest completed map for every fresh source draw list.
+    // A render-only capture can sample history even without new camera faces.
+    // Retained replays keep their original snapshot and never re-blend it.
+    return {freshFrame,EcstasyAdvanceEnvironmentImages(hasPrevious,freshFrame,logicalTick,capturedFaces)};
+}
 struct EcstasyNativeHistoryReaders {
     bool display{};
     bool environment{};
