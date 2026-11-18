@@ -1,7 +1,6 @@
 #include <exception>
 #include "indep/inc/AcidFX.hpp"
 #include "indep/inc/Car.hpp"
-#include "indep/inc/NativeRenderSettings.hpp"
 #include "bware/inc/bMath.hpp"
 #include "indep/inc/eMath.hpp"
 
@@ -1545,10 +1544,6 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
             if(eGetClipFlags(point,view.matrices.worldToClip)) {++result.centerClipped;continue;}
             float camera[4],clip[4],size[4];
             eMulVector4(camera,view.matrices.worldToView,point);
-            // Thin distant vehicle smoke/spray without modifying simulation
-            // particles, player effects, or camera/munition warning trails.
-            if(nativeEmergencySceneQuality && group->car && !group->car->bindings.player && camera[2]>20.0f &&
-                ((particle-system.particleStorage)&1))continue;
             eMulVector4(clip,view.matrices.worldToClip,point);
             worldParticleHermiteEvaluate(size,definition.sizeRotationCurve,age);
             float pixels=size[0]>0.0f ? (size[0]*view.pixelScale)/camera[2]:0.0f;

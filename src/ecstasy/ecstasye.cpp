@@ -2,6 +2,7 @@
 #include "indep/inc/Ecstasy.hpp"
 #include "indep/inc/Flags.hpp"
 #include "indep/inc/NativeRenderSettings.hpp"
+#include "indep/inc/NativePipelineCache.hpp"
 #if defined(_M_X64) || defined(__SSE2__)
 #include <xmmintrin.h>
 #endif
@@ -1887,7 +1888,7 @@ void EcstasyFrame::CaptureEnvironment(EnvironmentMap* environment,ResourceRegist
     inGameMaterials_=inGame;
     environment_=environment;environmentApplicationState_=applicationState;renderFrameCounter_=renderFrameCounter;
     environmentUpdated_=false;
-    environmentCameraFaces_=environment && !nativeEmergencySceneQuality ? environment->PendingCameraFaces():0u;
+    environmentCameraFaces_=environment ? environment->PendingCameraFaces():0u;
     // PAL112B28 downloads the actual CarSelectEnvMap descriptor into the
     // separate frontend texture slot used by AttachMicroCode10AF50/10B038.
     frontendEnvironmentTexture_=textureInfoForDescriptor(resources.SpecialTexture(8));
@@ -3092,7 +3093,6 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
             command.clipToScreen=&CaptureMaterialProjection(*strip.texture,projection);
         }
         command.strip=strip.geometry;command.drawFlags=lightContext?strip.flags:strip.flags&~0x1c0u;
-        if(nativeEmergencySceneQuality)command.drawFlags&=~0x180u;
         const auto index=static_cast<std::size_t>(strip.geometry->lightMaterialIndex);
         auto* material=index<geometry.lightMaterials.size()?geometry.lightMaterials[index]:nullptr;
         if(!material)material=fallback;
@@ -3153,7 +3153,7 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
     auto state=CaptureStripState();
     state.instance=&CaptureInstance(localToWorld,view,lightContext);
     state.projection=&CaptureProjection(view);
-    const bool environmentEnabled=environmentMappingEnabled!=0 && !nativeEmergencySceneQuality;
+    const bool environmentEnabled=environmentMappingEnabled!=0;
     std::size_t count=0;
     for(const auto& run:visible)count+=run.count;
     // Task size amortizes queue publication; CPU count is discovered by the
@@ -3201,7 +3201,7 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
         auto draw=static_cast<std::uint32_t>(strip.flags)|(texture->drawFlag4Enabled ? 4u:0u);
         if (clipClass==1)draw|=0x200u;
         if ((flags&1u) || !environmentEnabled)draw&=~0x100u;
-        if ((flags&2u) || nativeEmergencySceneQuality)draw&=~0x80u;
+        if (flags&2u)draw&=~0x80u;
         if (!lightContext)draw&=~0x1c0u; // released10DDE0 null-context mask
         const auto* submitted=&strip;
         if(boneMatrices) {
@@ -3348,7 +3348,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     Require(resources,"Display frame has no canonical resource owner");
     auto* simulation=scene.track ? scene.track->Simulation():nullptr;
     const auto applicationState=scene.applicationState ? *scene.applicationState:0;
-    if(scene.advancePresentation && scene.environmentMap && scene.environmentMap->enabled && !nativeEmergencySceneQuality)
+    if(scene.advancePresentation && scene.environmentMap && scene.environmentMap->enabled)
         UpdateEnvironmentMapCameras(*scene.environmentMap,views,simulation ? simulation->world:nullptr,
             scene.track ? scene.track->Players():nullptr,applicationState,scene.clock->realTimeElapsed);
     frame.CaptureEnvironment(scene.environmentMap,*resources,applicationState,views.renderFrameCounter,
@@ -3356,8 +3356,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     ecstasyViewsUpdateMode(&views);
     ecstasyViewsApplyMode(&views);
     const auto active=[](const CarCinematicScreen& view) {
-        return view.enabled && view.view && view.target && view.target->enabled &&
-            (!nativeEmergencySceneQuality || view.id<4);
+        return view.enabled && view.view && view.target && view.target->enabled;
     };
     for(auto& view:views.screens)if(active(view))
         Require(ecstasyViewCalculateMatrices(&views,&view,0,0,0)==CAR_CINEMATIC_OK,
@@ -3459,7 +3458,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         if(i<4 && simulation && simulation->world) {
             std::vector<SkidRenderQuad> skidQuads;
             WorldClans(*simulation->world).PrepareRender(view.matrices.worldToClip,view,skidQuads,
-                scene.advancePresentation,scene.emitRaceGeometry && !nativeEmergencySceneQuality);
+                scene.advancePresentation,scene.emitRaceGeometry);
             for(const auto& quad:skidQuads) {
                 frontend::FlailerPoly polygon;polygon.rasterState=quad.rasterState;
                 for(std::size_t vertex=0;vertex<quad.vertices.size();++vertex) {
@@ -3484,7 +3483,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
             (void)RenderWorldObjects(WorldObjects(*simulation->world),view,frame,
                 scene.clock->worldTimeFrames);
         // PAL11335C follows world objects with the authored light-flare pack.
-        if(scene.emitRaceGeometry && !nativeEmergencySceneQuality && i<4 && scene.track && scene.flow)
+        if(scene.emitRaceGeometry && i<4 && scene.track && scene.flow)
             (void)RenderWorldLightFlares(scene.track->files.Registry().Lights(),
                 scene.track->files.Registry(),view,frame,scene.flow->inGameFlag!=0);
     }
@@ -3520,7 +3519,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     // The scenery reflected strips read the previous mapped image; later
     // cars read the current update. Capture that version in each packet.
     frame.AttachSolidPolys();
-    if(scene.environmentMap && scene.environmentMap->enabled && !nativeEmergencySceneQuality && scene.flow && scene.flow->inGameFlag &&
+    if(scene.environmentMap && scene.environmentMap->enabled && scene.flow && scene.flow->inGameFlag &&
         active(frontend))scene.environmentMap->CreatePrimitives(frame);
     frame.AttachSolidPolys(); // PAL1135B8: remap solid chain only.
     const auto carCaptureStarted=std::chrono::steady_clock::now();
@@ -3564,7 +3563,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     captureCheckpoint(5);
     if(scene.emitRaceGeometry && scene.flow && scene.flow->inGameFlag) {
         frame.AttachFog(views);
-        if(!nativeEmergencySceneQuality)frame.AttachDepthOfField(views);
+        frame.AttachDepthOfField(views);
     }
     frame.AttachBlackAndWhite(views); // PAL113900, before DisplayFilter113A44.
     // PAL1139F0..113A8C: mask alpha precedes destination-alpha history blend.
@@ -7576,33 +7575,29 @@ void EcstasyVulkanDevice::Storage::Initialize()
     deviceCreate.enabledExtensionCount=static_cast<std::uint32_t>(deviceExtensions.size());
     deviceCreate.ppEnabledExtensionNames=deviceExtensions.data();
     vkRequired(vkCreateDevice(physical,&deviceCreate,nullptr,&device),"vkCreateDevice");vkGetDeviceQueue(device,queueFamily,0,&queue);
-    VkPipelineCacheCreateInfo cacheCreate{};cacheCreate.sType=VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
     std::vector<char> cacheData;
     if(!options.pipelineCachePath.empty()) {
         std::ifstream cache(options.pipelineCachePath,std::ios::binary|std::ios::ate);
         const auto bytes=cache.tellg();
         if(bytes>=32 && bytes<=16*1024*1024) {
-            cacheData.resize(static_cast<std::size_t>(bytes));
-            cache.seekg(0);
-            if(cache.read(cacheData.data(),static_cast<std::streamsize>(cacheData.size()))) {
-                std::array<std::uint32_t,4> header{};
-                std::memcpy(header.data(),cacheData.data(),sizeof(header));
-                if(header[0]>=32 && header[0]<=cacheData.size() &&
-                   header[1]==VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
-                   header[2]==properties.vendorID && header[3]==properties.deviceID &&
-                   !std::memcmp(cacheData.data()+sizeof(header),properties.pipelineCacheUUID,VK_UUID_SIZE)) {
-                    cacheCreate.initialDataSize=cacheData.size();
-                    cacheCreate.pInitialData=cacheData.data();
-                }
-            }
+            cacheData.resize(static_cast<std::size_t>(bytes));cache.seekg(0);
+            if(!cache.read(cacheData.data(),static_cast<std::streamsize>(cacheData.size())))cacheData.clear();
         }
     }
-    if(!cacheCreate.initialDataSize ||
-        vkCreatePipelineCache(device,&cacheCreate,nullptr,&pipelineCache)!=VK_SUCCESS) {
-        cacheCreate.initialDataSize=0;
-        cacheCreate.pInitialData=nullptr;
-        vkRequired(vkCreatePipelineCache(device,&cacheCreate,nullptr,&pipelineCache),"vkCreatePipelineCache");
-    }
+    NativePipelineCacheIdentity identity{properties.vendorID,properties.deviceID};
+    std::copy_n(properties.pipelineCacheUUID,identity.uuid.size(),identity.uuid.begin());
+    const auto createCache=[&](const void* data,std::size_t size) {
+        VkPipelineCacheCreateInfo create{};create.sType=VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+        create.initialDataSize=size;create.pInitialData=data;
+        VkPipelineCache result{};
+        const auto status=vkCreatePipelineCache(device,&create,nullptr,&result);
+        if(!size)vkRequired(status,"vkCreatePipelineCache(empty)");
+        return status==VK_SUCCESS ? result:VK_NULL_HANDLE;
+    };
+    pipelineCache=CreateNativePipelineCache<VkPipelineCache>(cacheData.data(),cacheData.size(),
+        options.pipelineCacheSeedData,options.pipelineCacheSeedSize,identity,createCache,
+        [&](VkPipelineCache destination,VkPipelineCache seed){(void)vkMergePipelineCaches(device,destination,1,&seed);},
+        [&](VkPipelineCache seed){vkDestroyPipelineCache(device,seed,nullptr);});
     if(timestampValidBits && timestampValidBits<=64 && properties.limits.timestampPeriod>0.0f) {
         VkQueryPoolCreateInfo queries{};queries.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
         queries.queryType=VK_QUERY_TYPE_TIMESTAMP;queries.queryCount=TimestampQueryCapacity;

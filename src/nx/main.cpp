@@ -6,6 +6,7 @@
 #include "controller_session.hpp"
 #include "config.hpp"
 #include "pgo.hpp"
+#include "pipeline_cache.hpp"
 
 #include "bware/inc/bFile.hpp"
 #include "bware/inc/bWare.hpp"
@@ -68,6 +69,8 @@ hp2::EcstasyVulkanOptions graphicsOptions()
     options.asyncPipelines=true;
     options.streamTransformBatching=true;
     options.pipelineCachePath=std::string(installDirectory)+"/Saves/VulkanPipelineCache.bin";
+    const auto seed=hp2::nx::BundledPipelineCache();
+    options.pipelineCacheSeedData=seed.data;options.pipelineCacheSeedSize=seed.size;
     return options;
 }
 
@@ -104,12 +107,6 @@ public:
     {
         const int limit=hp2::nx::gameplayPresentation ? hp2::nx::userSettings.frameLimit:0;
         if(limit!=presentationLimit_.Limit()) {presentationLimit_.SetLimit(limit);presentationLimit_.Reset(FrameTime());}
-        const bool fixedQuality=hp2::nx::adaptiveGameplay && hp2::nx::userSettings.testLowQuality;
-        const bool adaptive=hp2::nx::adaptiveGameplay && hp2::nx::userSettings.adaptiveDrawDistance && !fixedQuality;
-        if(adaptive!=adaptiveActive_ || fixedQuality!=testQualityActive_) {
-            adaptiveActive_=adaptive;testQualityActive_=fixedQuality;adaptiveDistance_.Reset();lastDistancePresent_={};
-            SetDrawDistance(testQualityActive_ ? hp2::nx::fixedTestDrawDistance:adaptiveDistance_.Scale());
-        }
         if(!appletMainLoop())return false;
         if(appletGetFocusState()!=AppletFocusState_InFocus) {
             StopRumble();
@@ -120,7 +117,6 @@ public:
             } while(appletGetFocusState()!=AppletFocusState_InFocus);
             ++timingEpoch_;
             refreshClock_={};presentationLimit_.Reset(FrameTime());
-            lastDistancePresent_={};adaptiveDistance_.Reset();SetDrawDistance(testQualityActive_ ? hp2::nx::fixedTestDrawDistance:0.6f);
         }
         if(clock_) {
             const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -321,35 +317,18 @@ private:
         HidLaControllerSupportResultInfo result{};
         const auto status=hidLaShowControllerSupportForSystem(&result,&argument,false);
         ++timingEpoch_;refreshClock_={};presentationLimit_.Reset(FrameTime());
-        lastDistancePresent_={};adaptiveDistance_.Reset();SetDrawDistance(testQualityActive_ ? hp2::nx::fixedTestDrawDistance:0.6f);
         for(std::size_t i=0;i<pads_.size();++i) {padUpdate(&pads_[i]);blockedButtons_[i]=padGetButtons(&pads_[i]);sources_[i]=ReadPhysical(i);}
         const bool ready=R_SUCCEEDED(status) && result.player_count==2 && padIsConnected(&pads_[0]) && padIsConnected(&pads_[1]);
         log_<<"input.controller_support result="<<status<<" players="<<int(result.player_count)<<" accepted="<<ready<<std::endl;
         return ready;
     }
     void FlushSlowFrames() {if(!slowFrameJournal_.empty()){log_<<slowFrameJournal_;slowFrameJournal_.clear();}}
-    void SetDrawDistance(float scale) {
-        const bool emergency=scale<0.3f;
-        const float mirror=emergency ? 0.25f:0.5f;
-        if(hp2::nativeRenderSettings().drawDistanceScale==scale &&
-            hp2::nativeRenderSettings().mirrorDistanceScale==mirror && hp2::nativeEmergencySceneQuality==emergency)return;
-        auto settings=hp2::nativeRenderSettings();settings.drawDistanceScale=scale;settings.mirrorDistanceScale=mirror;
-        hp2::nativeEmergencySceneQuality=emergency;
-        hp2::configureNativeRenderSettings(settings);graphics_.InvalidatePrepared();
-        log_<<"render.adaptive_distance scale="<<scale<<std::endl;
-        log_<<"render.adaptive_quality emergency="<<emergency<<" main_distance="<<scale
-            <<" mirror_distance="<<mirror<<" near_enter="<<(emergency?15:35)<<" near_exit="<<(emergency?22:50)
-            <<" reflections="<<!emergency<<" car_shadows="<<!emergency<<std::endl;
-    }
     void Presented(hp2::NativeFrameTiming::Clock::time_point started) {
         // Include CPU capture in the capped interval. Starting the timer
         // after capture would add that cost to every 33 ms interval.
         presentationLimit_.Presented(captureStarted_);
         captureStarted_=started;
-        if(adaptiveActive_ && lastDistancePresent_!=hp2::NativeFrameTiming::Clock::time_point{} &&
-            adaptiveDistance_.Observe(std::chrono::duration<double>(started-lastDistancePresent_).count(),hp2::nx::userSettings.frameLimit))
-            SetDrawDistance(adaptiveDistance_.Scale());
-        lastDistancePresent_=started;
+
     }
     struct Vibration {
         std::array<HidVibrationDeviceHandle,2> handles{};
@@ -383,9 +362,7 @@ private:
     const GameTime* clock_{};
     hp2::NativeRefreshClock refreshClock_;
     hp2::NativePresentationClock presentationLimit_;
-    hp2::nx::AdaptiveDrawDistance adaptiveDistance_;
-    hp2::NativeFrameTiming::Clock::time_point lastDistancePresent_{},captureStarted_{};
-    bool adaptiveActive_{},testQualityActive_{};
+    hp2::NativeFrameTiming::Clock::time_point captureStarted_{};
     std::string slowFrameJournal_;
     std::uint64_t timingEpoch_{};
     std::uint64_t captureFrames_{},captureCommands_{},captureInstances_{},captureProjections_{};
@@ -422,7 +399,7 @@ int main(int argc,char** argv)
         hp2::GameResources files(argc>1?std::filesystem::path(argv[1]):base);
         log<<"Creating Switch Vulkan host "<<width<<'x'<<height<<", CPU workers="
            <<hp2::NativeSceneEffectiveHardwareConcurrency()<<std::endl;
-        hp2::configureNativeRenderSettings({0.6f,0.5f});
+        hp2::configureNativeRenderSettings({0.3f,0.5f});
         log<<"render.lod_settings scenery_multiplier="<<hp2::nativeSceneryDetailDistanceFactor
            <<" vehicle_multiplier="<<hp2::nativeVehicleDetailDistanceFactor
            <<" near_detail_enter="<<hp2::nativeSceneryNearDetailEnterXY

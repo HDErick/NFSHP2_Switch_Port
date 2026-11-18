@@ -94,24 +94,17 @@ same race before and after changes using the timing windows above.
 The first launch creates `config.txt` next to the NRO. Gameplay defaults to a
 30 FPS cap and an FPS counter set to Off. Both are available in frontend and
 pause Display settings and saved when leaving the screen. See the README for
-config values and adaptive draw-distance thresholds.
+config values and the fixed scene profile.
 
 Capped-out race frames retain logical updates and presentation side effects,
 while suppressing race geometry capture. The cap includes capture time in its
 interval. It does not change the simulation clock, video-blank notifications,
 audio sample rate, or replay time.
 
-`render.adaptive_distance scale=...` records changes between 0.6, 0.4 and 0.2.
-`render.adaptive_quality` records emergency activation/restoration, mirror range,
-near-detail thresholds and the shadow/reflection policy. At the default cap,
-one second at 23 FPS or lower activates the emergency tier even during a hold.
-Five stable windows at 28 FPS restore the 0.4 tier and normal scene quality;
-five at 29.5 FPS then restore 0.6. See the README for all quality reductions.
-Tier changes invalidate prepared rendering before the next scene capture;
-workers see one fixed quality policy for that frame. Environment camera-face
-completion is suppressed while cubemap geometry is omitted. Cosmetic particle
-thinning only affects render submission, with stable pool-slot selection; all
-particles continue their original simulation and lifecycle.
+Main-view distance is permanently 0.3, mirror distance 0.5, vehicle LOD 1.75,
+and scenery near-detail hysteresis 35/50. Adaptive/emergency tiers and their
+configuration switches have been removed. Existing legacy keys are ignored.
+Scene quality remains normal, independent of frame rate and the chosen cap.
 `audio.backend_window` separates music decode, device command processing,
 software mixing/PCM conversion, and output-service work. These are accumulated
 milliseconds per fresh submitted frame across the same five-second window;
@@ -258,11 +251,9 @@ No draw order, transform precision, material or LOD changes are made.
 
 ## Slow-frame diagnostic build
 
-The diagnostic default `test_low_quality=1` holds active racing at 0.3 main
-distance, 0.5 mirror distance and normal scene quality. The existing config key
-is retained for compatibility. Adaptive quality changes are suspended during
-this test, including when an existing config has no new key.
-Set `test_low_quality=0` to resume the ordinary adaptive quality policy.
+Diagnostic logging is disabled by default. Configure
+`HP2_SWITCH_DIAGNOSTICS=ON` to collect the following records. This does not
+change the fixed scene profile.
 
 `render.slow_frame` records each accepted presentation interval over 50 ms.
 Its `frame` is the current CPU/Vulkan submission ID. Timing covers the entire
@@ -280,8 +271,8 @@ is available. It can precede the CPU `frame`; no extra GPU wait is introduced.
 `render.slow_gpu` separately reports completed GPU durations over 50 ms, once
 per submission, even when the current CPU presentation interval is shorter.
 
-`distance`, `next_distance`, `emergency` and `quality_changed` show the captured
-quality and any transition around the submission. HOME/controller-applet timing
+`distance` and `next_distance` remain 0.3 in the Switch build; the legacy
+`emergency` and `quality_changed` fields remain zero. HOME/controller-applet timing
 epochs clear the interval baseline so user interaction is not reported as a
 game stutter. Rows are buffered in RAM and written with the existing five-second
 summary flush or shutdown; a roughly 64 KiB bound forces a batch write if needed.
@@ -296,13 +287,34 @@ thread; file writes and flushes run on the worker. A 256 KiB queue drops excess
 diagnostic bytes instead of waiting for a blocked SD card and reports
 `log.dropped bytes=...` when writing resumes. Shutdown drains retained records.
 `log.backend asynchronous` confirms this logger is active. This change keeps
-the fixed 0.3 test distance, normal scene quality and slow-frame measurements.
+the fixed 0.3 distance, normal scene quality and slow-frame measurements.
 
 
-For performance comparison, configure `HP2_SWITCH_DIAGNOSTICS=OFF`. The
+Release builds default to `HP2_SWITCH_DIAGNOSTICS=OFF`. The
 `build-nx/pgo-use-no-logs/NFSHP2.nro` build creates no NFSHP2 log file, starts
 no log writer, and omits timing summaries, slow-frame records, sampled draw
 category/shadow timing and detailed GPU pass sampling. Basic presentation/FPS
 timing, game saves/configuration and the shader cache remain functional. It
-uses the same PGO training data, fixed 0.3 testing distance and normal scene
+uses the same PGO training data, fixed 0.3 distance and normal scene
 quality as the diagnostic build. An existing log file is left untouched.
+
+
+## Bundled Vulkan pipeline cache
+
+`VulkanPipelineCache.bin` is a tracked startup seed captured from this renderer.
+`tools/nx/embed_pipeline_cache.py` validates its version-one header and emits
+an immutable C++ byte array in the build directory. `src/nx/pipeline_cache.cpp`
+links those exact bytes into the NRO; no external ROMFS or runtime seed copy is
+needed. Replacing the root file makes CMake regenerate the embedded array.
+
+At device creation, both the SD cache and the bundled seed must match the live
+Vulkan vendor/device IDs and pipeline-cache UUID. If both are usable, the SD
+cache is the primary owner and the seed is merged into it before pipeline
+workers start. Identical blobs are not merged twice. A rejected SD cache falls
+back to the seed, and rejected or incompatible sources fall back to an empty
+cache. The temporary merge source is destroyed after use. Normal shutdown
+continues saving the expanded cache to `Saves/VulkanPipelineCache.bin`.
+
+Pipeline caches accelerate compilation for states they contain; they do not
+pre-create every Vulkan pipeline object or guarantee coverage for every scene.
+See the [Vulkan pipeline-cache documentation](https://docs.vulkan.org/spec/latest/chapters/pipelines.html).

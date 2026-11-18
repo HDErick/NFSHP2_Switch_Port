@@ -549,8 +549,7 @@ float sceneryNativeDistanceSquaredFootprintXY(const float bounds[4],
 bool sceneryNativeNearDetailState(float distanceSquared,bool previous) noexcept
 {
     if(!std::isfinite(distanceSquared) || distanceSquared<0.0f)return false;
-    const float reach=nativeEmergencySceneQuality ? (previous ? 22.0f:15.0f) :
-        (previous ? nativeSceneryNearDetailExitXY : nativeSceneryNearDetailEnterXY);
+    const float reach=previous ? nativeSceneryNearDetailExitXY : nativeSceneryNearDetailEnterXY;
     return distanceSquared<=reach*reach;
 }
 
@@ -604,14 +603,9 @@ std::size_t sceneryNativeSelectDetailLod(const SceneryModel& model,
     // meter from a pump, wall or building edge. Keep the REAL high-detail
     // solid while its world envelope is near; never fabricate a missing LOD.
     // PAL visibility cutoff has already run in the caller, unchanged.
-    if(model.levels[0].solid && std::isfinite(distanceToSurface) &&
+    if(lod>0 && model.levels[0].solid && std::isfinite(distanceToSurface) &&
         distanceToSurface>=0.0f &&
-        distanceToSurface<=(nativeEmergencySceneQuality ? 15.0f:nativeSceneryHighDetailSurfaceDistance))return 0;
-    if(nativeEmergencySceneQuality) {
-        // Keep the original admission test and only select an existing mesh.
-        for(std::size_t coarser=3;coarser>lod+1;--coarser)
-            if(model.levels[coarser-1].solid)return coarser-1;
-    }
+        distanceToSurface<=nativeSceneryHighDetailSurfaceDistance)return 0;
     return lod;
 }
 

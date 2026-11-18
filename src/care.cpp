@@ -85,7 +85,7 @@ std::size_t carRenderNativeDetailLod(const EditorMarkerModel* models,
 {
     constexpr float minimumPixels[4]={120.0f,45.0f,20.0f,0.0f}; // PAL2AD0E8
     const auto detailPixels=hp2::nativeDetailLodPixels(originalPixels,
-        hp2::nativeEmergencySceneQuality ? 1.0f:hp2::nativeVehicleDetailDistanceFactor);
+        hp2::nativeVehicleDetailDistanceFactor);
     std::size_t lod=0;
     while(lod<3 && static_cast<float>(detailPixels)<minimumPixels[lod] &&
         models[lod+1].solid)++lod;
@@ -1258,8 +1258,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     carPartCullerCull(render.cullers.data(),localEye);
     // The Switch limits mesh and secondary pass work for AI race opponents.
 #ifdef __SWITCH__
-    const bool reducedDetail=car && (car->driverInfo->driverClass==2 ||
-        (hp2::nativeEmergencySceneQuality && car->driverInfo->driverClass!=1)) &&
+    const bool reducedDetail=car && car->driverInfo->driverClass==2 &&
         (!render.bindings->applicationState || *render.bindings->applicationState!=3);
 #else
     constexpr bool reducedDetail=false;
@@ -1288,7 +1287,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
         "Car/tire LOD override is outside its authored mesh domain");
     if(bodyOverride!=-1)lod=static_cast<std::size_t>(bodyOverride);
     if(wheelOverride!=-1)wheelLod=static_cast<std::size_t>(wheelOverride);
-    else if((reducedDetail || hp2::nativeEmergencySceneQuality) && render.models[8].solid && render.models[9].solid)wheelLod=2;
+    else if(reducedDetail && render.models[8].solid && render.models[9].solid)wheelLod=2;
     // This is the source raw +18 predicate. Its historical native name
     // 'culled' is retained to avoid changing already-audited owner layout.
     const auto part=[&](std::size_t index){return render.cullers[index].culled!=0;};
@@ -1312,7 +1311,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     const auto bodyLighting=lightContexts.Setup(transform,
         frame.EnvironmentMatrix(),view.view->current.eye,view,applicationState);
     const std::uint32_t environmentFlags=
-        !reducedDetail && !hp2::nativeEmergencySceneQuality && hp2::environmentMappingEnabled && pixels>=18 ? 0u:1u;
+        !reducedDetail && hp2::environmentMappingEnabled && pixels>=18 ? 0u:1u;
     const auto draw=[&](std::size_t slot,const float* matrix,std::uint32_t flags=0u,float alpha=1.0f) {
         std::optional<hp2::SceneLightContext> partLighting;
         const hp2::SceneLightContext* context=nullptr;
@@ -1328,7 +1327,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     std::size_t submitted=renderCarLightFlares(render,car,view,frame,transform,worldFrames,lightFlags);
     // PAL121A84..121D10: use the same appearance/character owner, original
     // pixel thresholds, passenger-seat offset and front-facing detail rule.
-    if(!reducedDetail && !hp2::nativeEmergencySceneQuality && car && car->driverVisible && car->visual && car->driverInfo && view.id!=3 && !car->visual->replaySuppressed) {
+    if(!reducedDetail && car && car->driverVisible && car->visual && car->driverInfo && view.id!=3 && !car->visual->replaySuppressed) {
         auto& driver=*car->visual;
         hp2::Require(driver.bindings.vehicle && render.definition && render.textures,
             "Car driver rendering lost its authored appearance owners");
@@ -1360,7 +1359,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     }
     const auto shadowLod=distanceScale>1.0f ?
         std::min(lod,carRenderNativeDetailLod(render.models.data(),visibilityPixels)):lod;
-    if(!hp2::nativeEmergencySceneQuality) {
+    {
         const auto* movement=car ? car->Movement():nullptr;
         const auto* terrain=movement && movement->bindings.environment ?
             movement->bindings.environment->contact.terrain:nullptr;
@@ -1404,7 +1403,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
         // PAL123024..1231B0: blur is an additional authored wheel model,
         // not a substitute mesh. Reuse each wheel's calculated matrix/light
         // context and preserve the original left-side, right-side order.
-        if(!reducedDetail && !hp2::nativeEmergencySceneQuality && wheelLod<2 && !frontend && car) {
+        if(!reducedDetail && wheelLod<2 && !frontend && car) {
             const auto* movement=car->Movement();
             hp2::Require(movement && movement->bindings.state,"Wheel blur lost its physical wheel state");
             constexpr std::size_t order[4]={0,3,1,2};
@@ -1417,7 +1416,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
                     view,sourceFlags|1u,1.0f,worldFrames,&context);
             }
         }
-        if(!reducedDetail && !hp2::nativeEmergencySceneQuality && lod<2) {
+        if(!reducedDetail && lod<2) {
             float reversed[16];eIdentity(reversed);reversed[5]=-1.0f;
             for(std::size_t wheel=0;wheel<4;++wheel)if(frontend || part(wheel+6)) {
                 float local[16],world[16];
@@ -1430,7 +1429,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     }
     // Source wiper animation uses the same frame timer window and encoded
     // rigid animation start; RenderModel evaluates its real animation tree.
-    if(!reducedDetail && !hp2::nativeEmergencySceneQuality && pixels>40 && car)if(auto* carFrame=car->Frame()) {
+    if(!reducedDetail && pixels>40 && car)if(auto* carFrame=car->Frame()) {
         const auto& state=carFrame->state;
         const bool active=state.signalWindowLocked ||
             (worldFrames>=state.signalWindowStart && worldFrames<state.signalWindowEnd);

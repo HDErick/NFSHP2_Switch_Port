@@ -24,9 +24,7 @@ std::string_view trim(std::string_view value) {
 bool SaveUserSettings() noexcept {
     try {
         if(savedValid && userSettings.language==savedSettings.language && userSettings.frameLimit==savedSettings.frameLimit &&
-            userSettings.showFps==savedSettings.showFps &&
-            userSettings.adaptiveDrawDistance==savedSettings.adaptiveDrawDistance &&
-            userSettings.testLowQuality==savedSettings.testLowQuality)return true;
+            userSettings.showFps==savedSettings.showFps)return true;
         // Replace only after a complete write. Menu changes write on leaving
         // Display, never during the render loop or for adaptive transitions.
         auto pending=configPath;pending+=".tmp";
@@ -37,11 +35,7 @@ bool SaveUserSettings() noexcept {
             <<"# Language: -1 follows the game/profile; 0 EN, 1 FR, 2 DE, 3 IT, 4 ES, 5 SV.\n"
             <<"language="<<userSettings.language<<"\n"
             <<"# Show the FPS counter: 0 = off, 1 = on.\n"
-            <<"show_fps="<<userSettings.showFps<<"\n"
-            <<"# Scene quality: 0.6 normally, 0.4 under load, emergency 0.2 at 23 FPS.\n"
-            <<"adaptive_draw_distance="<<userSettings.adaptiveDrawDistance<<"\n"
-            <<"# Diagnostic baseline: 1 holds 0.3 draw distance with normal scene quality; 0 restores adaptive behavior.\n"
-            <<"test_low_quality="<<userSettings.testLowQuality<<"\n";
+            <<"show_fps="<<userSettings.showFps<<"\n";
         file.flush();const bool good=file.good();file.close();
         if(!good || file.fail())throw std::runtime_error("Could not write Switch config");
         std::error_code error;
@@ -81,13 +75,11 @@ void LoadUserSettings(const std::filesystem::path& directory,std::ostream& log) 
         if(key=="language" && number>=-1 && number<=5)userSettings.language=number;
         else if(key=="frame_limit" && number>=0 && number<=60)userSettings.frameLimit=number;
         else if(key=="show_fps" && (number==0 || number==1))userSettings.showFps=number!=0;
-        else if(key=="adaptive_draw_distance" && (number==0 || number==1))userSettings.adaptiveDrawDistance=number!=0;
-        else if(key=="test_low_quality" && (number==0 || number==1))userSettings.testLowQuality=number!=0;
     }
     if(!exists)SaveUserSettings();
     else {savedSettings=userSettings;savedValid=true;}
     log<<"config.loaded path="<<configPath.string()<<" frame_limit="<<userSettings.frameLimit
-       <<" language="<<userSettings.language<<" show_fps="<<userSettings.showFps<<" adaptive_draw_distance="<<userSettings.adaptiveDrawDistance<<" test_low_quality="<<userSettings.testLowQuality<<std::endl;
+       <<" language="<<userSettings.language<<" show_fps="<<userSettings.showFps<<std::endl;
 }
 void CycleFrameLimit(int direction) noexcept {
     constexpr std::array<int,9> choices{{20,24,25,30,40,45,50,60,0}};

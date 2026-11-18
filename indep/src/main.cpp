@@ -246,7 +246,7 @@ struct ApplicationRuntime::Storage {
         double collisionMs{},thinkMs{},effectsMs{};
     } slowFrame;
     NativeFrameTiming::Clock::time_point slowLastPresent{};
-    float slowLastDrawDistance{0.6f};
+    float slowLastDrawDistance{nativeRenderSettings().drawDistanceScale};
     std::uint64_t lastSlowGpuFrame{};
     NativeFrameTiming::Clock::time_point lastAcceptedPresent{};
     std::uint64_t presentsOver33ms{},presentsOver50ms{};
@@ -615,8 +615,7 @@ struct ApplicationRuntime::Storage {
         const auto* session=Session();
         nx::UpdateControllerSession(profilesOwner.playerCount,profilesOwner.IsChallengeGame());
         nx::gameplayPresentation=flow.inGameFlag!=0;
-        nx::adaptiveGameplay=session && session->state==RC_STATE_RACE_IN_PROGRESS &&
-            (!screens.active || !screens.active->screen || screens.active->screen->screenId==-1);
+
         nx::drivingControls=session && (session->state==RC_STATE_PRE_RACE ||
             session->state==RC_STATE_RACE_IN_PROGRESS) &&
             (!screens.active || !screens.active->screen || screens.active->screen->screenId==-1);
@@ -845,7 +844,7 @@ bool ApplicationRuntime::Tick()
         s.frameTiming.Reset(resumed);s.simulationClock.Reset(resumed);applicationFrameTiming={};
     }
     const float frameDrawDistance=nativeRenderSettings().drawDistanceScale;
-    const bool frameEmergency=nativeEmergencySceneQuality;
+    constexpr bool frameEmergency=false;
     auto observed=s.host.FrameTime();
     if(!s.simulationClock.UpdateDue(observed) && !s.host.PresentationDue(observed)) {
         {platform::ScopedNativeDuration measure(s.slowFrame.wait);

@@ -1276,6 +1276,9 @@ struct EcstasyVulkanOptions {
     // Skip a draw until its exact pipeline has compiled on the worker.
     bool asyncPipelines{};
     std::string pipelineCachePath;
+    // Optional immutable startup seed; storage must survive device creation.
+    const void* pipelineCacheSeedData{};
+    std::size_t pipelineCacheSeedSize{};
     // Opt-in transport experiment for maintainer parity/performance controls.
     // The measured candidate did not improve total CPU time, so normal play
     // keeps the direct path. Launcher and authored quality stay unchanged.

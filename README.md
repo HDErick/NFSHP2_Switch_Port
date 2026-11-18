@@ -42,8 +42,6 @@ On first boot the port creates `config.txt` beside the running NRO. Defaults:
 ```ini
 frame_limit=30
 show_fps=0
-adaptive_draw_distance=1
-test_low_quality=1
 language=-1
 ```
 
@@ -64,38 +62,28 @@ the game/profile until a language is explicitly selected; `0` English, `1`
 French, `2` German, `3` Italian, `4` Spanish and `5` Swedish select one directly.
 
 
-This diagnostic build defaults to `test_low_quality=1`: active gameplay stays
-at **0.3×** draw distance with normal scene quality and **0.5×** mirror distance.
-Adaptive quality changes are suspended during the test. This also applies to existing config
-files that do not yet contain the new key. Add `test_low_quality=0` to restore
-the adaptive behavior below. Menus and paused frontend rendering retain normal
-quality. The setting is written with the other display settings on save.
+Main-view draw distance is fixed at **0.3×**, mirror distance at **0.5×**, and
+normal scene quality is retained. Vehicle LOD uses **1.75×** and scenery keeps
+the **35/50** near-detail range. FPS no longer changes distance, LOD policy,
+shadows or reflections. Legacy `adaptive_draw_distance` and `test_low_quality`
+config entries are ignored; no config edit is needed after updating.
 
-A separate no-log performance build is available at
-`build-nx/pgo-use-no-logs/NFSHP2.nro` (`HP2_SWITCH_DIAGNOSTICS=OFF`). It uses the
-same fixed 0.3× test profile and keeps the FPS display available. Diagnostic
-files and timing summaries are disabled in that build.
+Diagnostic logging is **off by default** (`HP2_SWITCH_DIAGNOSTICS=OFF`). The
+no-log NRO keeps the FPS display available. Enable the CMake option only when
+collecting diagnostic logs; those writes use a background worker.
 
-Adaptive distance starts at **0.6×** and drops to **0.4×** after two consecutive
-one-second windows below 28 FPS. At **23 FPS or lower**, one measured window
-activates emergency scene quality with **0.2×** main distance and **0.25×** mirror
-distance. This escalation can happen during an existing recovery hold.
+### Vulkan pipeline cache
 
-Emergency quality uses coarser scenery and vehicle meshes, a 15/22-unit scenery
-near-detail range, simpler wheels, fewer distant non-player vehicle particles,
-and no car shadows, environment reflections, specular passes, decorative world
-flares, skid-mark geometry or depth of field. Player/camera/munition warning
-effects remain visible. AI, collisions, audio, HUD and 1280×720 output retain
-their existing behavior.
+The project-root `VulkanPipelineCache.bin` is embedded in the NRO during the
+build. It contains driver-generated pipeline/shader compilation data from the
+Switch renderer, and is used to warm the pipeline cache on startup. The port
+checks the cache header, GPU IDs and driver cache UUID before using it.
 
-After five consecutive windows at **28 FPS or better**, emergency quality ends
-and distance returns to **0.4×**. Another five stable windows at **29.5 FPS or
-better** restore **0.6×**. Each transition has a five-second minimum dwell before
-quality increases. Thresholds scale down for caps below 30. All quality settings
-restore outside active racing and after HOME resume. Set
-`adaptive_draw_distance=0` to keep the normal 0.6×/0.5× quality profile.
-The normal vehicle LOD multiplier remains 1.75×; emergency mode removes that
-boost and simplifies non-player cars further.
+Compatible data already in `sdmc:/switch/NFSHP2/Saves/VulkanPipelineCache.bin`
+is merged with the bundled seed. Missing, incompatible or rejected cache data
+falls back safely. New pipeline states still compile asynchronously, and the
+expanded cache is saved to the SD card on normal exit. The embedded seed stays
+read-only and does not need to be copied beside the NRO.
 
 ### Controllers
 

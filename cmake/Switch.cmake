@@ -15,7 +15,7 @@ target_link_libraries(NFSHP2Core PRIVATE "${HP2_SWITCH_PNG_LIBRARY}" z)
 target_sources(NFSHP2Core PRIVATE src/nx/config.cpp src/nx/display_options.cpp)
 
 add_executable(NFSHP2 src/nx/main.cpp src/nx/audio.cpp src/nx/pgo.cpp)
-option(HP2_SWITCH_DIAGNOSTICS "Write Switch diagnostic logs and detailed timing summaries" ON)
+option(HP2_SWITCH_DIAGNOSTICS "Write Switch diagnostic logs and detailed timing summaries" OFF)
 if(NOT HP2_SWITCH_DIAGNOSTICS)
     foreach(hp2_target IN ITEMS NFSHP2Core NFSHP2Engine NFSHP2)
         target_compile_definitions(${hp2_target} PRIVATE HP2_DISABLE_DIAGNOSTICS=1)
@@ -28,6 +28,14 @@ target_link_libraries(NFSHP2 PRIVATE "$<LINK_GROUP:RESCAN,NFSHP2Engine,NFSHP2Cor
 nx_generate_nacp(OUTPUT NFSHP2.nacp NAME "Need for Speed: Hot Pursuit 2"
     AUTHOR "HDErick" VERSION "1.0")
 find_program(HP2_ICON_PYTHON NAMES python3 python REQUIRED)
+set(HP2_PIPELINE_CACHE_SEED "${CMAKE_CURRENT_SOURCE_DIR}/VulkanPipelineCache.bin")
+set(HP2_PIPELINE_CACHE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/pipeline_cache_seed.inc")
+add_custom_command(OUTPUT "${HP2_PIPELINE_CACHE_HEADER}"
+    COMMAND "${HP2_ICON_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/nx/embed_pipeline_cache.py"
+        "${HP2_PIPELINE_CACHE_SEED}" "${HP2_PIPELINE_CACHE_HEADER}"
+    DEPENDS "${HP2_PIPELINE_CACHE_SEED}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/nx/embed_pipeline_cache.py"
+    VERBATIM)
+target_sources(NFSHP2Core PRIVATE src/nx/pipeline_cache.cpp "${HP2_PIPELINE_CACHE_HEADER}")
 set(HP2_BUTTONS_PNG "${CMAKE_CURRENT_SOURCE_DIR}/buttons.png")
 set(HP2_BUTTONS_HEADER "${CMAKE_CURRENT_BINARY_DIR}/buttons_png.inc")
 add_custom_command(OUTPUT "${HP2_BUTTONS_HEADER}"
