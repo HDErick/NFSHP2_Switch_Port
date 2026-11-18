@@ -3550,6 +3550,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     frame.DisplayRadialBlur(views);
     frame.DisplayBlendPrevious(views);
     frame.SetZWriteState(1);
+    if(frontend.target)frame.MarkSceneHistoryBoundary(*frontend.target);
     // Source113A90..113D80: effect-free HUD packets, followed by resumption
     // of the selected mode. Each packet captures its issuing render policy;
     // later Gather cannot leak the resumed scene state into these HUD draws.
@@ -3604,6 +3605,16 @@ void EcstasyFrame::RetireStripAfterCompletion(frontend::FlailerStrip& strip)
     Require(phase_==Phase::Building && strip.pool && strip.retentionCount,
         "Graphics frame requires the actual retained Flailer strip");
     retainedStrips_.push_back(&strip);
+}
+
+void EcstasyFrame::MarkSceneHistoryBoundary(const EcstasyRenderTarget& display)
+{
+    Require(phase_==Phase::Building && display.id>=0 && display.id<7,
+        "Scene history boundary lost its display target");
+    AttachAlphaPolys();
+    EcstasyDrawCommand command;command.kind=EcstasyDrawKind::SceneHistoryBoundary;
+    command.target=&display;commands_.push_back(command);
+    pendingAlphaBegin_=commands_.size();
 }
 
 void EcstasyFrame::Seal()
@@ -6323,7 +6334,8 @@ void CollectNativeTextureReferences(std::vector<VkNativeTextureKey>& referenced,
     bool lastClamp=false;
     for(const auto& draw:commands) {
         if(draw.kind==EcstasyDrawKind::FogPass || draw.kind==EcstasyDrawKind::FocusMaskPass ||
-            draw.kind==EcstasyDrawKind::DepthOfFieldPass || draw.kind==EcstasyDrawKind::BlackAndWhitePass)continue;
+            draw.kind==EcstasyDrawKind::DepthOfFieldPass || draw.kind==EcstasyDrawKind::BlackAndWhitePass ||
+            draw.kind==EcstasyDrawKind::SceneHistoryBoundary)continue;
         if(draw.sampledTarget) {
             Require(!draw.texture,"Target-sampled draw has conflicting image owners");continue;
         }
@@ -6781,6 +6793,7 @@ struct EcstasyVulkanDevice::Storage {
         std::uint64_t particles{};
         std::array<double,2> displayTranslation{};
         EcstasyNativeHistoryReaders historyReaders;
+        bool sceneHistoryBoundary{},useDisplayHistory{};
         std::set<std::int32_t> destinations;
         std::vector<EcstasyDepthTransfer> depthTransfers;
         std::vector<NativePreparedDepthInput> depthInputs;
@@ -6811,6 +6824,9 @@ struct EcstasyVulkanDevice::Storage {
         preparedFrame.sourceCommands=frame.Commands().size();
         preparedFrame.displayTranslation=frame.DisplayTranslation();
         preparedFrame.historyReaders=EcstasyFindNativeHistoryReaders(frame.Commands());
+        preparedFrame.sceneHistoryBoundary=std::any_of(frame.Commands().begin(),frame.Commands().end(),
+            [](const EcstasyDrawCommand& draw){return draw.kind==EcstasyDrawKind::SceneHistoryBoundary;});
+        preparedFrame.useDisplayHistory=!preparedFrame.sceneHistoryBoundary || (hasFrame && displaySceneHistoryValid);
         preparedFrame.destinations.clear();
         preparedFrame.depthTransfers=frame.DepthTransfers();
         preparedFrame.depthInputs.clear();
@@ -6864,6 +6880,7 @@ struct EcstasyVulkanDevice::Storage {
     };
     std::vector<DepthReadback> depthReadbacks;
     bool hasFrame{};
+    bool displaySceneHistoryValid{};
     // Only Vulkan-owned resources remain live after CPU frame completion.
     // Wait for this fence before reusing the command buffer, mapped geometry,
     // image descriptors or temporary staging allocations. The CPU may build
@@ -7211,7 +7228,7 @@ struct EcstasyVulkanDevice::Storage {
         // A resize retires the actual depth image. A request for that image
         // cannot later be applied to a differently sized replacement.
         InvalidateRecordedCommands();preparedFrame.valid=false;
-        depthReadbacks.clear();Destroy(depthStaging);hasFrame=false;
+        depthReadbacks.clear();Destroy(depthStaging);hasFrame=false;displaySceneHistoryValid=false;
         nativeSubmissionPending=false;
         for(auto& entry:renderedTargets)Destroy(entry.second);
         renderedTargets.clear();
@@ -7789,7 +7806,7 @@ void EcstasyVulkanDevice::Storage::CreateTargets()
         vkRequired(vkCreateFramebuffer(device,&framebufferCreate,nullptr,&replacement),"vkCreateFramebuffer(depth sampling colors)");
     }catch(...) {if(replacement)vkDestroyFramebuffer(device,replacement,nullptr);throw;}
     depthSamplingFramebuffer=replacement;
-    hasFrame=false;
+    hasFrame=false;displaySceneHistoryValid=false;
 }
 
 void EcstasyVulkanDevice::Storage::CreateDepthSamplingPass()
@@ -8749,6 +8766,14 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         return true;
     };
     for (const auto& draw:frame.Commands()) {
+        if(draw.kind==EcstasyDrawKind::SceneHistoryBoundary) {
+            // Ordinary racing retains its single pass and does no history copy.
+            if(preparedFrame.historyReaders.display) {
+                VkDrawBatch marker;marker.target=0;marker.textureFunction=11;
+                batches.push_back(marker);
+            }
+            continue;
+        }
         if(draw.cachedOpaqueScenery) {
             if(prepareSceneryPacket(draw))continue;
             ++statistics.sceneryPacketFallbacks;
@@ -9558,13 +9583,12 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     }
 
     InitializeSampledTargets();
-    // Before the scene clears the completed display, copy its pixels only
-    // when this frame actually samples that PREVIOUS image. B30 copied the
-    // entire display every frame, including frames with no history reader;
-    // this cost a full-resolution GPU transfer and several barriers.
+    // Scene captures publish history before the HUD. Copying the completed
+    // display here would feed gauges/maps into the RT/LT camera blur.
+    // Keep the old path only for callers without an explicit scene boundary.
     const auto historyReaders=preparedFrame.historyReaders;
     const bool advancesPresentation=frame && frame->AdvancesPresentation();
-    if(historyReaders.display && hasFrame && advancesPresentation) {
+    if(historyReaders.display && !preparedFrame.sceneHistoryBoundary && hasFrame && advancesPresentation) {
         CopyHistory(0,color.image,false);
 
     }
@@ -9865,6 +9889,10 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         const auto pipelineLookupStarted=Clock::now();
         if(!reuseRecording)for(std::size_t index=0;index<packets.size();++index) {
             const auto& batch=*packets[index];
+            // On effect entry there is no HUD-free previous scene yet. Seed
+            // it below and omit just the first historical blend, not the effect.
+            if(batch.textureFunction==11 || (batch.sampledPreviousFrame && batch.sampledTarget==0 &&
+                !preparedFrame.useDisplayHistory)) {preparedPipelines.push_back(VK_NULL_HANDLE);continue;}
             const bool sample=fogPlan.present && fogPlan.direct && index>=fogPlan.first && index<=fogPlan.last;
             VkPipeline pipeline{};
             if(batch.cachedOpaqueScenery && !sample && samples==VK_SAMPLE_COUNT_1_BIT) {
@@ -10070,10 +10098,17 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
             return (samplingDepth && index>fogPlan.last) ||
                 (batch.feedbackGroup && feedbackGroup!=batch.feedbackGroup) ||
                 ((batch.textureFunction==5 || batch.textureFunction==6) && !copiedFogDepth) ||
-                batch.textureFunction==8;
+                batch.textureFunction==8 || batch.textureFunction==11;
         };
         for(std::size_t packetIndex=0;packetIndex<packets.size();) {
             const auto& batch=*packets[packetIndex];
+            if(batch.textureFunction==11) {
+                Require(id==0,"Scene history boundary targets an offscreen image");
+                endPass();
+                if(samplingDepth) {SetFogDepthReadable(false);samplingDepth=false;}
+                if(advancesPresentation)CopyHistory(0,color.image,false);
+                ++packetIndex;continue;
+            }
             if(samplingDepth && packetIndex>fogPlan.last) {
                 endPass();SetFogDepthReadable(false);samplingDepth=false;
             }
@@ -10135,8 +10170,8 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         milliseconds(Clock::now()-sceneRecordStarted)-statistics.renderProfile.pipelineLookupMilliseconds);
     // FXAA samples the CURRENT image through the existing history descriptor,
     // so it still needs a same-frame transfer. Ordinary race frames do not.
-    // A future frame with a genuine previous-frame reader copies the retained
-    // completed color before that frame overwrites it (above).
+    // Camera history has already been captured before the HUD; FXAA uses
+    // its separate feedback image and cannot overwrite that history.
     const auto antialiasingPipeline=antialiasing.count?Pipeline(antialiasing):VK_NULL_HANDLE;
     if(antialiasing.count && !antialiasingPipeline)++statistics.pendingPipelineDraws;
     if(antialiasingPipeline) {
@@ -10259,6 +10294,8 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     // World/Frontend to prepare the next frame while this GPU frame runs.
     // Actual *GPU* buffer/texture retirement is still fence-gated above.
     if(frame)frame->Complete();
+    if(advancesPresentation)displaySceneHistoryValid=
+        preparedFrame.sceneHistoryBoundary && historyReaders.display;
     hasFrame=true;preparedFrame.valid=true;
     recordedBuffers=RecordedBufferHandles();recordedFrameDescriptor=frameDescriptor;
     recordedPipelineLayout=pipelineLayout;recordedCommandsValid=statistics.pendingPipelineDraws==0;

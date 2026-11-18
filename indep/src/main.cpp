@@ -1276,6 +1276,16 @@ bool ApplicationRuntime::Tick()
                 s.longestPresentIntervalMs,static_cast<unsigned long long>(s.presentsOver33ms),
                 static_cast<unsigned long long>(s.presentsOver50ms));
             s.host.RecordSessionEvent("render.phase_window",detail);
+            const auto effectSteps=static_cast<double>(std::max<std::uint64_t>(1,s.worldProfile.sampledSteps));
+            std::snprintf(detail,sizeof(detail),
+                "scenario=%d fps=%.2f interactions_ms=%.3f feedback_ms=%.3f particles_ms=%.3f surface_effects_ms=%.3f "
+                "cops=%.1f cops_within_150m=%.1f particles=%.1f emitters=%.1f particle_pool=shared_free_list",
+                s.parameters.selectedScenario,1000.0*count/windowMilliseconds,
+                s.worldProfile.interactionsMs/count,s.worldProfile.feedbackMs/count,
+                s.worldProfile.particlesMs/count,s.worldProfile.surfaceEffectsMs/count,
+                s.worldProfile.copSamples/effectSteps,s.worldProfile.nearbyCopSamples/effectSteps,
+                s.worldProfile.particleSamples/effectSteps,s.worldProfile.emitterSamples/effectSteps);
+            s.host.RecordSessionEvent("render.chase_window",detail);
             const auto& cpu=s.renderProfile;
             const auto shadowSamples=static_cast<double>(std::max<std::uint64_t>(1,cpu.shadowGatherSamples));
             std::snprintf(detail,sizeof(detail),

@@ -254,6 +254,8 @@ typedef struct WorldSimulation {
 
 typedef struct WorldStepProfile {
     double thinkingMs, driveMs, collisionMs, effectsMs, finishMs;
+    double interactionsMs, feedbackMs, particlesMs, surfaceEffectsMs;
+    uint64_t sampledSteps, copSamples, nearbyCopSamples, particleSamples, emitterSamples;
 } WorldStepProfile;
 WorldSimulationResult worldDoTimestep(WorldSimulation* simulation, float elapsed, WorldStepProfile* profile);
 CollisionSystemResult worldServicesAdvanceParticipants(struct CollisionSystem* system, float elapsed);

@@ -360,12 +360,14 @@ WorldSimulationResult worldDoTimestep(WorldSimulation* simulation, float elapsed
             return worldSimulationFailCar(simulation, index, WORLD_SIMULATION_FRAME_FAILURE);
     finishPhase(&WorldStepProfile::collisionMs);
 
+    const auto effectsStart=phaseStart;
     worldSimulationResetContactElapsed(simulation);
     for (int32_t index = 0; index < world->totalCars; ++index) {
         if (worldGetDistanceToClosestPlayer3D(world, world->carTable[index]->position) < 100.0f &&
             carFrameInteractionSetup(simulation->frames[index]) != CAR_FRAME_OK)
             return worldSimulationFailCar(simulation, index, WORLD_SIMULATION_FRAME_FAILURE);
     }
+    finishPhase(&WorldStepProfile::interactionsMs);
     if (!worldSimulationSuppressSurfaceFeedback(simulation)) {
         for (int32_t index = 0; index < world->firstGroupEnd; ++index) {
             if (carFrameUpdateAccelerationFeedback(simulation->frames[index]) != CAR_FRAME_OK)
@@ -374,16 +376,28 @@ WorldSimulationResult worldDoTimestep(WorldSimulation* simulation, float elapsed
                 return worldSimulationFailCar(simulation, index, WORLD_SIMULATION_FRAME_FAILURE);
         }
     }
+    finishPhase(&WorldStepProfile::feedbackMs);
     if (worldParticlesAdvance(simulation->particles, elapsed) != WORLD_SERVICES_OK)
         return simulation->result = WORLD_SIMULATION_SERVICE_FAILURE;
+    finishPhase(&WorldStepProfile::particlesMs);
+    if(profile) {
+        ++profile->sampledSteps;
+        profile->particleSamples+=simulation->particles->particleCount;
+        profile->emitterSamples+=simulation->particles->emitterCount;
+    }
     for (int32_t index = 0; index < world->totalCars; ++index) {
         const float distance = worldGetDistanceToClosestPlayer3D(world, world->carTable[index]->position);
+        if(profile && simulation->drivers[index]->kind==CAR_DRIVER_COP) {
+            ++profile->copSamples;
+            if(distance<150.0f)++profile->nearbyCopSamples;
+        }
         CarMovement* movement = carFrameMovement(simulation->frames[index]);
         if (distance < 150.0f && carMotionClassActionAllowed(movement->bindings.ownerMotion) &&
             carFrameUpdateSurfaceEffects(simulation->frames[index], distance) != CAR_FRAME_OK)
             return worldSimulationFailCar(simulation, index, WORLD_SIMULATION_FRAME_FAILURE);
     }
-    finishPhase(&WorldStepProfile::effectsMs);
+    finishPhase(&WorldStepProfile::surfaceEffectsMs);
+    if(profile)profile->effectsMs+=std::chrono::duration<double,std::milli>(phaseStart-effectsStart).count();
     /* PAL14E190..14E1BC visits every car for132A70. Its complete body is
      * JR RA/NOP, so this side-effect-free pass is explicitly retired (zero count).
      * PAL12A158/1D9B60/1B52D0 are likewise exact empty tails. The separate

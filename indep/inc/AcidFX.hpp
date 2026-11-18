@@ -194,6 +194,13 @@ struct WorldParticleGroup {
     int32_t occupied;
 };
 
+// Native free-slot ownership is shared by the World and Frame effect systems.
+// Only unoccupied slots borrow their next link for the free lists.
+struct WorldParticleFreePool {
+    WorldParticle* particles{};
+    WorldParticleGroup* groups{};
+};
+
 /* The authoring view edits the same decoded definition used by live groups.
  * Game assets retain their baked curves without a second mutable catalogue. */
 struct WorldParticleSystem {
@@ -201,6 +208,7 @@ struct WorldParticleSystem {
     ChopperEffectInstance* lastEmitter;
     WorldParticleGroup* firstGroup;
     WorldParticleGroup* lastGroup;
+    WorldParticleFreePool* freePool;
     WorldParticle* particleStorage;
     size_t particleCapacity;
     WorldParticleGroup* groupStorage;

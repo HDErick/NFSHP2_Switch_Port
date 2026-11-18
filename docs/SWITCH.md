@@ -175,3 +175,27 @@ progress. The selected preference takes priority when loading profiles and
 when synchronizing the runtime language; `language.profile_override` records
 an attempted profile mismatch. This prevents the observed 4 (Spanish) to
 0 (English) switch immediately after successful language loading.
+
+
+## Chase effects and camera history
+
+World and Frame effects share native free lists for the original 1,000 particle
+and 400 group slots. Allocation and pool exhaustion no longer scan occupied
+slots for every spawn. Live list order, simulation, particle limits and visual
+definitions are preserved. Standalone externally supplied pools retain the
+linear allocation fallback.
+
+The five-second `render.chase_window` event separates nearby-car interactions,
+controller surface feedback, particle updates and car surface effects. Timings
+are milliseconds per presented frame, including all simulation steps in that
+frame. Cop counts, cops within 150 metres, particles and emitters are averages
+per simulation step. These complement the existing collision, capture, Gather,
+audio and GPU timings without per-particle logging.
+
+RT scout and LT orbit camera history is captured after scene effects and before
+the HUD, including the mirror overlay, track map and FPS display. On entry,
+the first historical blend is omitted until a clean scene has been captured.
+Normal frames without a history reader do not copy or split the scene pass;
+repeated prepared submissions do not advance history. FXAA retains its separate
+feedback image. Console testing is needed to confirm the visible camera result
+and measure the chase FPS change.

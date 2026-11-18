@@ -46,7 +46,9 @@ void removeParticle(WorldParticleSystem& system, WorldParticleGroup& group, Worl
     if (particle.next) particle.next->previous = particle.previous;
     else group.last = particle.previous;
     particle.occupied = 0;
-    particle.next = particle.previous = nullptr;
+    particle.previous = nullptr;
+    particle.next = system.freePool ? system.freePool->particles : nullptr;
+    if (system.freePool) system.freePool->particles = &particle;
     --system.particleCount;
 }
 
@@ -139,32 +141,43 @@ WorldParticleGroup* acquireParticleGroup(WorldParticleSystem& system,
     WorldParticleGroup* group = emitter.particleGroup;
     if (group && group->occupied && group->generation == emitter.particleGroupGeneration &&
         group->emitter == &emitter && group->car == car) return group;
-    for (size_t index = 0; index < system.groupCapacity; ++index) {
-        group = &system.groupStorage[index];
-        if (group->occupied) continue;
-        *group = {};
-        group->definition = emitter.particleDefinition;
-        group->emitter = &emitter;
-        group->car = car;
-        group->generation = system.nextGeneration++;
-        group->occupied = 1;
-        group->previous = system.lastGroup;
-        if (system.lastGroup) system.lastGroup->next = group;
-        else system.firstGroup = group;
-        system.lastGroup = group;
-        emitter.particleGroup = group;
-        emitter.particleGroupGeneration = group->generation;
-        ++system.groupCount;
-        return group;
+    if (system.freePool) {
+        group = system.freePool->groups;
+        if (!group) return nullptr;
+        system.freePool->groups = group->next;
+    } else {
+        group = nullptr;
+        for (size_t index = 0; index < system.groupCapacity; ++index)
+            if (!system.groupStorage[index].occupied) {group = &system.groupStorage[index]; break;}
+        if (!group) return nullptr;
     }
-    return nullptr;
+    *group = {};
+    group->definition = emitter.particleDefinition;
+    group->emitter = &emitter;
+    group->car = car;
+    group->generation = system.nextGeneration++;
+    group->occupied = 1;
+    group->previous = system.lastGroup;
+    if (system.lastGroup) system.lastGroup->next = group;
+    else system.firstGroup = group;
+    system.lastGroup = group;
+    emitter.particleGroup = group;
+    emitter.particleGroupGeneration = group->generation;
+    ++system.groupCount;
+    return group;
 }
 
 WorldParticle* acquireParticle(WorldParticleSystem& system, WorldParticleGroup& group)
 {
-    for (size_t index = 0; index < system.particleCapacity; ++index) {
-        WorldParticle* particle = &system.particleStorage[index];
-        if (particle->occupied) continue;
+    WorldParticle* particle = nullptr;
+    if (system.freePool) {
+        particle = system.freePool->particles;
+        if (particle) system.freePool->particles = particle->next;
+    } else {
+        for (size_t index = 0; index < system.particleCapacity; ++index)
+            if (!system.particleStorage[index].occupied) {particle = &system.particleStorage[index]; break;}
+    }
+    if (particle) {
         *particle = {};
         particle->occupied = 1;
         particle->previous = group.last;
@@ -414,7 +427,9 @@ void worldParticlesDisposeGroup(WorldParticleSystem* system, WorldParticleGroup*
     }
     group->emitter = nullptr;
     group->occupied = 0;
-    group->next = group->previous = nullptr;
+    group->previous = nullptr;
+    group->next = system->freePool ? system->freePool->groups : nullptr;
+    if (system->freePool) system->freePool->groups = group;
     --system->groupCount;
 }
 
@@ -1129,6 +1144,7 @@ struct AcidFXRuntime::Storage {
     std::array<WorldParticleGroup,400> groups{};
     std::array<ChopperEffectInstance,600> emitters{};
     std::uint32_t randomState=0x23985727u;
+    WorldParticleFreePool freePool{};
     WorldParticleSystem system{};
     WorldParticleSystem frameSystem{};
     ChopperMunitionEffects handler{};
@@ -1146,6 +1162,15 @@ AcidFXRuntime::AcidFXRuntime(const CarCinematicServices& cameras)
     // are separate. No effect has been published during either initializer.
     worldParticlesInitialize(&state.frameSystem,state.particles.data(),state.particles.size(),
         state.groups.data(),state.groups.size(),&state.randomState,&cameras);
+    // Initialize once after both list owners. The two systems allocate
+    // from the same retail-sized pools, including exhaustion and reuse.
+    for (std::size_t i=state.particles.size();i>0;--i) {
+        auto& slot=state.particles[i-1];slot.next=state.freePool.particles;state.freePool.particles=&slot;
+    }
+    for (std::size_t i=state.groups.size();i>0;--i) {
+        auto& slot=state.groups[i-1];slot.next=state.freePool.groups;state.freePool.groups=&slot;
+    }
+    state.system.freePool=state.frameSystem.freePool=&state.freePool;
     chopperEffectsInitialize(&state.handler,state.emitters.data(),state.emitters.size(),
         nullptr,0,nullptr,0);
     Require(chopperEffectsBindParticles(&state.handler,&state.system)==WORLD_SERVICES_OK,
