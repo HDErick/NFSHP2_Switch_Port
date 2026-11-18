@@ -455,9 +455,8 @@ private:
             if(services_.sounds)services_.frontend->CaptureAudioOptions(*services_.sounds,true);
         }
 #ifdef __SWITCH__
-        nx::userSettings.language=selected_;
+        nx::SetSessionLanguage(selected_);
         services_.frontend->currentLanguage=selected_;
-        nx::SaveUserSettings();
 #endif
     }
     MainMenuScreenServices& services_;

@@ -42,7 +42,6 @@ On first boot the port creates `config.txt` beside the running NRO. Defaults:
 ```ini
 frame_limit=30
 show_fps=0
-language=-1
 ```
 
 `frame_limit` caps gameplay presentation (including the pause scene); use `0`
@@ -56,10 +55,10 @@ saves both to `config.txt`. Show FPS defaults to Off. Config edits take effect
 on the next launch. The menu offers 20, 24, 25, 30, 40, 45, 50, 60, and Uncapped;
 manual config values between these choices are also accepted.
 
-Choosing a language in the PAL selector saves it as a Switch-wide preference,
-so loading a profile cannot switch it back to English. `language=-1` follows
-the game/profile until a language is explicitly selected; `0` English, `1`
-French, `2` German, `3` Italian, `4` Spanish and `5` Swedish select one directly.
+Choose the language on the PAL selector each time the game starts. The choice
+is kept only for the current session, including changes in Options. Loading a
+profile preserves that session choice. Language is not stored in `config.txt`;
+legacy `language=` entries are ignored.
 
 
 Main-view draw distance is fixed at **0.3×**, mirror distance at **0.5×**, and

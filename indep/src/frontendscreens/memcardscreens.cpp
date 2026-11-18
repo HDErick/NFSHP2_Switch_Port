@@ -137,7 +137,7 @@ MemcardScreens::LoadResult MemcardScreens::LoadProfile()
     if(!state.frontend.DeserializeNativeProfileText(bytes.data(),bytes.size(),state.error))return failed(state.error);
     state.blockedByLoadFailure=false;
 #ifdef __SWITCH__
-    state.frontend.currentLanguage=nx::PreferredLanguage(state.frontend.currentLanguage);
+    state.frontend.currentLanguage=nx::LanguageForSession(state.frontend.currentLanguage);
 #endif
 
     if(state.menus && state.menus->ui && state.menus->ui->language &&

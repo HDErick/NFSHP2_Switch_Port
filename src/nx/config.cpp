@@ -23,7 +23,7 @@ std::string_view trim(std::string_view value) {
 }
 bool SaveUserSettings() noexcept {
     try {
-        if(savedValid && userSettings.language==savedSettings.language && userSettings.frameLimit==savedSettings.frameLimit &&
+        if(savedValid && userSettings.frameLimit==savedSettings.frameLimit &&
             userSettings.showFps==savedSettings.showFps)return true;
         // Replace only after a complete write. Menu changes write on leaving
         // Display, never during the render loop or for adaptive transitions.
@@ -32,8 +32,6 @@ bool SaveUserSettings() noexcept {
         file<<"# Nintendo Switch display settings\n"
             <<"# Gameplay presentation cap: 0 = uncapped, 1..60 = FPS. Menus use VSync.\n"
             <<"frame_limit="<<userSettings.frameLimit<<"\n"
-            <<"# Language: -1 follows the game/profile; 0 EN, 1 FR, 2 DE, 3 IT, 4 ES, 5 SV.\n"
-            <<"language="<<userSettings.language<<"\n"
             <<"# Show the FPS counter: 0 = off, 1 = on.\n"
             <<"show_fps="<<userSettings.showFps<<"\n";
         file.flush();const bool good=file.good();file.close();
@@ -58,7 +56,7 @@ bool SaveUserSettings() noexcept {
     }
 }
 void LoadUserSettings(const std::filesystem::path& directory,std::ostream& log) {
-    configPath=directory/"config.txt";journal=&log;userSettings={};savedValid=false;
+    configPath=directory/"config.txt";journal=&log;userSettings={};savedValid=false;selectedSessionLanguage=-1;
     auto previous=configPath;previous+=".bak";
     if(!std::filesystem::exists(configPath) && std::filesystem::exists(previous))
         std::filesystem::rename(previous,configPath);
@@ -72,14 +70,13 @@ void LoadUserSettings(const std::filesystem::path& directory,std::ostream& log) 
         const auto key=trim(view.substr(0,equals)),value=trim(view.substr(equals+1));
         int number{};const auto parsed=std::from_chars(value.data(),value.data()+value.size(),number);
         if(value.empty() || parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size())continue;
-        if(key=="language" && number>=-1 && number<=5)userSettings.language=number;
-        else if(key=="frame_limit" && number>=0 && number<=60)userSettings.frameLimit=number;
+        if(key=="frame_limit" && number>=0 && number<=60)userSettings.frameLimit=number;
         else if(key=="show_fps" && (number==0 || number==1))userSettings.showFps=number!=0;
     }
     if(!exists)SaveUserSettings();
     else {savedSettings=userSettings;savedValid=true;}
     log<<"config.loaded path="<<configPath.string()<<" frame_limit="<<userSettings.frameLimit
-       <<" language="<<userSettings.language<<" show_fps="<<userSettings.showFps<<std::endl;
+       <<" show_fps="<<userSettings.showFps<<std::endl;
 }
 void CycleFrameLimit(int direction) noexcept {
     constexpr std::array<int,9> choices{{20,24,25,30,40,45,50,60,0}};

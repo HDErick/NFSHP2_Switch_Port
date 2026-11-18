@@ -767,11 +767,7 @@ void ApplicationRuntime::Initialize(const std::filesystem::path& configFile)
             std::this_thread::yield();
         }});
     // Final LoadLanguageInfo100808 tail100818 calls SetLanguage(0).
-#ifdef __SWITCH__
-    s.language.SetLanguage(nx::PreferredLanguage(0));
-#else
     s.language.SetLanguage(0);
-#endif
     // PAL LoadGlobalChunks1683DC..16847C loads the initial dynamic image
     // after language selection, then services its real queued pixel reads.
     // English language0 itself does not request this texture.
@@ -886,9 +882,9 @@ bool ApplicationRuntime::Tick()
             s.host.ApplyDisplaySettings(display.width,display.height,display.fullscreen,display.vsync);
             s.RefreshNativeDisplayGeometry();
 #ifdef __SWITCH__
-            const int preferredLanguage=nx::PreferredLanguage(s.profilesOwner.currentLanguage);
+            const int preferredLanguage=nx::LanguageForSession(s.profilesOwner.currentLanguage);
             if(s.profilesOwner.currentLanguage!=preferredLanguage) {
-                char detail[96]{};std::snprintf(detail,sizeof(detail),"profile=%d preferred=%d",
+                char detail[96]{};std::snprintf(detail,sizeof(detail),"profile=%d selected_session=%d",
                     s.profilesOwner.currentLanguage,preferredLanguage);
                 s.host.RecordSessionEvent("language.profile_override",detail);
                 s.profilesOwner.currentLanguage=preferredLanguage;

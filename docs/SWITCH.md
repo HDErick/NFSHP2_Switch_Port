@@ -173,11 +173,14 @@ The PC interface, desktop controls, DualSense output and new graphics options
 were not imported. Descriptor-indexed batching and the new particle backend
 require a separate Switch adaptation and hardware validation.
 
-Explicit language selections are saved to `config.txt` independently of game
-progress. The selected preference takes priority when loading profiles and
-when synchronizing the runtime language; `language.profile_override` records
-an attempted profile mismatch. This prevents the observed 4 (Spanish) to
-0 (English) switch immediately after successful language loading.
+The PAL language selector is shown on every boot. Explicit choices are held
+only in memory for that session and never read from or written to `config.txt`.
+Legacy `language=` config entries are ignored. Startup uses the original
+English bootstrap table until a language is chosen. Both the startup screen
+and Options update the session choice, which takes priority over a saved
+profile's language. `language.profile_override` records a profile mismatch
+against that session choice, preserving the fix for Spanish reverting to
+English after a profile load.
 
 
 ## Chase effects and camera history
