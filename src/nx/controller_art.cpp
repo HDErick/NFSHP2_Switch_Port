@@ -1,4 +1,5 @@
 #include "controller_art.hpp"
+#include "platform.hpp"
 
 #include <png.h>
 
@@ -9,13 +10,13 @@
 
 namespace hp2::nx {
 namespace {
-constexpr char atlasPath[]="sdmc:/switch/NFSHP2/Glyphs/buttons.png";
-constexpr char commonDiagram[]="sdmc:/switch/NFSHP2/Glyphs/controller.png";
+constexpr char atlasPath[]=HP2_NX_INSTALL_DIRECTORY "/Glyphs/buttons.png";
+constexpr char commonDiagram[]=HP2_NX_INSTALL_DIRECTORY "/Glyphs/controller.png";
 constexpr std::array<const char*,4> diagrams{{
-    "sdmc:/switch/NFSHP2/Glyphs/controller30.png",
-    "sdmc:/switch/NFSHP2/Glyphs/controller31.png",
-    "sdmc:/switch/NFSHP2/Glyphs/controller32.png",
-    "sdmc:/switch/NFSHP2/Glyphs/controller33.png",
+    HP2_NX_INSTALL_DIRECTORY "/Glyphs/controller30.png",
+    HP2_NX_INSTALL_DIRECTORY "/Glyphs/controller31.png",
+    HP2_NX_INSTALL_DIRECTORY "/Glyphs/controller32.png",
+    HP2_NX_INSTALL_DIRECTORY "/Glyphs/controller33.png",
 }};
 
 constexpr std::uint8_t embeddedAtlas[]{

@@ -40,6 +40,7 @@
 #ifdef __SWITCH__
 #include <switch.h>
 #include "src/nx/controller_art.hpp"
+#include "src/nx/display.hpp"
 #endif
 #include <cmath>
 #include <vector>
@@ -3835,7 +3836,9 @@ void graphicsNotifyPresentationComplete() noexcept {
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <windows.h>
 #elif defined(__SWITCH__)
+#ifndef VK_USE_PLATFORM_VI_NN
 #define VK_USE_PLATFORM_VI_NN
+#endif
 #endif
 #include <vulkan/vulkan.h>
 #include <chrono>
@@ -7834,6 +7837,11 @@ void EcstasyVulkanDevice::Storage::CreateTargets()
             else throw std::runtime_error("This surface supports only synchronized FIFO presentation");
         }
         vkRequired(vkCreateSwapchainKHR(device,&create,nullptr,&swapchain),"vkCreateSwapchainKHR");swapFormat=selected.format;
+#ifdef __SWITCH2__
+        // The driver's FIFO setup can set a 60 Hz swap interval. Restore the
+        // application's VI2 rate after every swapchain creation, including resume.
+        nx::UpdateDisplayRefresh(true);
+#endif
         vkRequired(vkGetSwapchainImagesKHR(device,swapchain,&count,nullptr),"vkGetSwapchainImagesKHR");swapImages.resize(count);
         vkRequired(vkGetSwapchainImagesKHR(device,swapchain,&count,swapImages.data()),"vkGetSwapchainImagesKHR");
         presentationSemaphores.resize(count);
@@ -9693,7 +9701,9 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         CopyHistory(0,color.image,false);
 
     }
-    if(historyReaders.environment && advancesPresentation) {
+    const bool advanceEnvironmentImages=EcstasyAdvanceEnvironmentImages(hasFrame,frame!=nullptr,
+        frame && frame->AdvancesPresentation(),frame ? frame->CapturedEnvironmentFaces():0);
+    if(historyReaders.environment && advanceEnvironmentImages) {
         auto previousEnvironment=renderedTargets.find(14);
         if(previousEnvironment!=renderedTargets.end() && previousEnvironment->second.initialized) {
             CopyHistory(14,previousEnvironment->second.color.image,true);
@@ -10267,6 +10277,10 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         vkCmdWriteTimestamp(commands,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestampQueries,timestampCount++);
     const auto visit=[&](const auto& self,std::int32_t id)->void {
         Require(id>=0 && id<static_cast<std::int32_t>(visited.size()),"Vulkan target graph lost its target range");
+        // Upstream 136ac47d: do not blend the persistent environment image
+        // again on render-only frames. Fresh pending faces may also be
+        // captured between ticks when gameplay presentation is capped.
+        if(id==14 && !advanceEnvironmentImages)return;
         const auto index=static_cast<std::size_t>(id);
         if(visited[index]==2)return;
         Require(visited[index]!=1,"Original render-target graph has a current-frame sampling cycle");

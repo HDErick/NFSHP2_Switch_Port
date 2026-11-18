@@ -1,6 +1,8 @@
 #include <switch.h>
 
 #include "audio.hpp"
+#include "display.hpp"
+#include "platform.hpp"
 #include "async_log.hpp"
 #include "control_layout.hpp"
 #include "controller_session.hpp"
@@ -26,15 +28,17 @@
 #include <stdexcept>
 #include <utility>
 
+#ifndef __SWITCH2__
 extern "C" {
 // libnx applies this APM configuration in handheld mode. Docked uses HOS defaults.
 u32 __nx_applet_PerformanceConfiguration[2]={0x92220008,0};
 }
+#endif
 
 namespace {
-constexpr int width=1280;
-constexpr int height=720;
-constexpr char installDirectory[]="sdmc:/switch/NFSHP2";
+constexpr int width=hp2::nx::renderWidth;
+constexpr int height=hp2::nx::renderHeight;
+using hp2::nx::installDirectory;
 std::ostream* languageJournal{};
 using hp2::platform::Ps2Button;
 
@@ -58,7 +62,7 @@ hp2::EcstasyVulkanOptions graphicsOptions()
 {
     auto* window=nwindowGetDefault();
     if(!window)throw std::runtime_error("libnx did not provide a default display window");
-    (void)nwindowSetDimensions(window,width,height);
+    hp2::nx::ConfigureDisplayWindow();
     hp2::EcstasyVulkanOptions options;
     options.width=width;
     options.height=height;
@@ -108,6 +112,7 @@ public:
         const int limit=hp2::nx::gameplayPresentation ? hp2::nx::userSettings.frameLimit:0;
         if(limit!=presentationLimit_.Limit()) {presentationLimit_.SetLimit(limit);presentationLimit_.Reset(FrameTime());}
         if(!appletMainLoop())return false;
+        hp2::nx::UpdateDisplayRefresh();
         if(appletGetFocusState()!=AppletFocusState_InFocus) {
             StopRumble();
             profile_.Checkpoint(true);
@@ -115,6 +120,7 @@ public:
                 svcSleepThread(16'000'000);
                 if(!appletMainLoop())return false;
             } while(appletGetFocusState()!=AppletFocusState_InFocus);
+            hp2::nx::UpdateDisplayRefresh(true);
             ++timingEpoch_;
             refreshClock_={};presentationLimit_.Reset(FrameTime());
         }
@@ -269,9 +275,11 @@ public:
             return 0;
         return static_cast<std::size_t>(total-used);
     }
-    void ApplyDisplaySettings(int32_t newWidth,int32_t newHeight,bool,bool vsync) override
+    void ApplyDisplaySettings(int32_t,int32_t,bool,bool vsync) override
     {
-        graphics_.SetLogicalSize(newWidth,newHeight);
+        // Camera targets already use the fixed console render extent. A PC
+        // profile's 1280x720 preference must not enlarge a 1080p viewport again.
+        graphics_.SetLogicalSize(width,height);
         graphics_.ConfigurePresentation(vsync);
     }
 
@@ -386,8 +394,10 @@ int main(int argc,char** argv)
         log<<"log.backend asynchronous queue_bytes=262144"<<std::endl;
 #endif
         auto configDirectory=base;
+#ifndef __SWITCH2__
         if(argc>0 && argv[0] && std::filesystem::path(argv[0]).extension()==".nro" &&
             std::filesystem::path(argv[0]).has_parent_path())configDirectory=std::filesystem::path(argv[0]).parent_path();
+#endif
         hp2::nx::LoadUserSettings(configDirectory,log);
         applicationShowFrameRate=hp2::nx::userSettings.showFps;
         hp2::nx::PgoSession profile(saves,log);
@@ -399,11 +409,12 @@ int main(int argc,char** argv)
         hp2::GameResources files(argc>1?std::filesystem::path(argv[1]):base);
         log<<"Creating Switch Vulkan host "<<width<<'x'<<height<<", CPU workers="
            <<hp2::NativeSceneEffectiveHardwareConcurrency()<<std::endl;
-        hp2::configureNativeRenderSettings({0.3f,0.5f});
-        log<<"render.lod_settings scenery_multiplier="<<hp2::nativeSceneryDetailDistanceFactor
-           <<" vehicle_multiplier="<<hp2::nativeVehicleDetailDistanceFactor
-           <<" near_detail_enter="<<hp2::nativeSceneryNearDetailEnterXY
-           <<" near_detail_exit="<<hp2::nativeSceneryNearDetailExitXY
+        hp2::configureNativeRenderSettings({});
+        hp2::configureNativeFrameLimitQuality(hp2::nx::userSettings.frameLimit);
+        log<<"render.lod_settings scenery_multiplier="<<hp2::nativeSceneQuality().sceneryLod
+           <<" vehicle_multiplier="<<hp2::nativeSceneQuality().vehicleLod
+           <<" near_detail_enter="<<hp2::nativeSceneQuality().nearDetailEnter
+           <<" near_detail_exit="<<hp2::nativeSceneQuality().nearDetailExit
            <<" draw_distance="<<hp2::nativeRenderSettings().drawDistanceScale
            <<" mirror_distance="<<hp2::nativeRenderSettings().mirrorDistanceScale
            <<" gpu_scenery_clip_max_strips="<<hp2::nativeGpuSceneryClipMaximumStrips<<std::endl;

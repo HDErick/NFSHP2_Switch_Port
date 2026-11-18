@@ -1,5 +1,7 @@
 #pragma once
 
+#include "platform.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -8,7 +10,7 @@
 
 namespace hp2::nx {
 struct UserSettings {
-    int frameLimit{30}; // 0 = uncapped, otherwise 1..60.
+    int frameLimit{defaultFrameLimit}; // 0 = uncapped, otherwise 1..maximumFrameLimit.
     bool showFps{};
 };
 inline UserSettings userSettings;

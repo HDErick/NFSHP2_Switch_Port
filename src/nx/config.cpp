@@ -30,7 +30,7 @@ bool SaveUserSettings() noexcept {
         auto pending=configPath;pending+=".tmp";
         std::ofstream file(pending,std::ios::trunc);
         file<<"# Nintendo Switch display settings\n"
-            <<"# Gameplay presentation cap: 0 = uncapped, 1..60 = FPS. Menus use VSync.\n"
+            <<"# Gameplay presentation cap: 0 = uncapped, 1.."<<maximumFrameLimit<<" = FPS. Menus use VSync.\n"
             <<"frame_limit="<<userSettings.frameLimit<<"\n"
             <<"# Show the FPS counter: 0 = off, 1 = on.\n"
             <<"show_fps="<<userSettings.showFps<<"\n";
@@ -70,7 +70,7 @@ void LoadUserSettings(const std::filesystem::path& directory,std::ostream& log) 
         const auto key=trim(view.substr(0,equals)),value=trim(view.substr(equals+1));
         int number{};const auto parsed=std::from_chars(value.data(),value.data()+value.size(),number);
         if(value.empty() || parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size())continue;
-        if(key=="frame_limit" && number>=0 && number<=60)userSettings.frameLimit=number;
+        if(key=="frame_limit" && number>=0 && number<=maximumFrameLimit)userSettings.frameLimit=number;
         else if(key=="show_fps" && (number==0 || number==1))userSettings.showFps=number!=0;
     }
     if(!exists)SaveUserSettings();
@@ -79,9 +79,14 @@ void LoadUserSettings(const std::filesystem::path& directory,std::ostream& log) 
        <<" show_fps="<<userSettings.showFps<<std::endl;
 }
 void CycleFrameLimit(int direction) noexcept {
+#ifdef __SWITCH2__
+    constexpr std::array<int,12> choices{{20,24,25,30,40,45,50,60,75,90,120,0}};
+#else
     constexpr std::array<int,9> choices{{20,24,25,30,40,45,50,60,0}};
+#endif
     auto at=std::find(choices.begin(),choices.end(),userSettings.frameLimit);
-    const auto index=at==choices.end() ? 3:static_cast<int>(at-choices.begin());
-    userSettings.frameLimit=choices[static_cast<std::size_t>((index+(direction<0 ? 8:1))%9)];
+    const auto index=at==choices.end() ? static_cast<int>(std::find(choices.begin(),choices.end(),defaultFrameLimit)-choices.begin()):static_cast<int>(at-choices.begin());
+    const auto count=static_cast<int>(choices.size());
+    userSettings.frameLimit=choices[static_cast<std::size_t>((index+(direction<0 ? count-1:1))%count)];
 }
 }

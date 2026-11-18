@@ -14,8 +14,8 @@ build command, and PAL 1.00 data requirements.
 Copy the NRO and your PAL 1.00 PS2 archive pair to this layout.
 
 ```text
-sdmc:/switch/NFSHP2/
-  NFSHP2.nro
+sdmc:/switch/NFSHP2-Switch/
+  NFSHP2-Switch.nro
   ZDIR.BIN
   ZZDATA.BIN
 ```
@@ -23,7 +23,7 @@ sdmc:/switch/NFSHP2/
 Launch through the Homebrew Menu in full application mode. On first run,
 check the title screen, controller navigation, a race, HOME suspend and
 resume, and whether a profile survives closing and reopening the game.
-Startup failures are logged to `sdmc:/switch/NFSHP2/Saves/NFSHP2_log.txt`.
+Startup failures are logged to `sdmc:/switch/NFSHP2-Switch/Saves/NFSHP2_log.txt`.
 
 ## Race performance logs
 
@@ -36,7 +36,7 @@ fields measure a single call or the longest interval between accepted presents.
 
 ## Switch LTO and PGO experiment
 
-Keep the ordinary `build-nx/NFSHP2.nro` as the baseline. Configure these
+Keep the ordinary `build-nx/NFSHP2-Switch.nro` as the baseline. Configure these
 variants with the same toolchain and Release options as the README command.
 If that command uses `HP2_ICON_PYTHON`, pass the same value to each variant.
 
@@ -52,7 +52,7 @@ data. Spend most of the session racing with traffic and opponents. Use a few
 menu and loading transitions too. The training build instruments scene capture
 and Vulkan preparation, with cumulative snapshots saved at startup, every
 20 seconds, on loss of app focus, and on clean exit, under
-`sdmc:/switch/NFSHP2/Saves/pgo/`. After training, press HOME and return to the
+`sdmc:/switch/NFSHP2-Switch/Saves/pgo/`. After training, press HOME and return to the
 game once. A `pgo.saved` line in `NFSHP2_log.txt` names the finished stream.
 Use a checkpoint collected during or after racing. The training NRO carries
 instrumentation and is only for collecting counters.
@@ -294,7 +294,7 @@ the fixed 0.3 distance, normal scene quality and slow-frame measurements.
 
 
 Release builds default to `HP2_SWITCH_DIAGNOSTICS=OFF`. The
-`build-nx/pgo-use-no-logs/NFSHP2.nro` build creates no NFSHP2 log file, starts
+`build-nx/pgo-use-no-logs/NFSHP2-Switch.nro` build creates no NFSHP2 log file, starts
 no log writer, and omits timing summaries, slow-frame records, sampled draw
 category/shadow timing and detailed GPU pass sampling. Basic presentation/FPS
 timing, game saves/configuration and the shader cache remain functional. It

@@ -12,7 +12,7 @@ target_sources(NFSHP2Core PRIVATE src/nx/controller_art.cpp)
 target_include_directories(NFSHP2Core PRIVATE "${HP2_SWITCH_PNG_INCLUDE}")
 target_link_libraries(NFSHP2Core PRIVATE "${HP2_SWITCH_PNG_LIBRARY}" z)
 
-target_sources(NFSHP2Core PRIVATE src/nx/config.cpp src/nx/display_options.cpp)
+target_sources(NFSHP2Core PRIVATE src/nx/config.cpp src/nx/display_options.cpp src/nx/display.cpp)
 
 add_executable(NFSHP2 src/nx/main.cpp src/nx/audio.cpp src/nx/pgo.cpp)
 option(HP2_SWITCH_DIAGNOSTICS "Write Switch diagnostic logs and detailed timing summaries" OFF)
@@ -25,17 +25,29 @@ include(cmake/SwitchOptimization.cmake)
 set(CMAKE_CXX_LINK_GROUP_USING_RESCAN_SUPPORTED TRUE)
 set(CMAKE_CXX_LINK_GROUP_USING_RESCAN "LINKER:--start-group" "LINKER:--end-group")
 target_link_libraries(NFSHP2 PRIVATE "$<LINK_GROUP:RESCAN,NFSHP2Engine,NFSHP2Core>")
-nx_generate_nacp(OUTPUT NFSHP2.nacp NAME "Need for Speed: Hot Pursuit 2"
+if(NINTENDO_SWITCH2)
+    target_sources(NFSHP2 PRIVATE src/nx/threads.cpp)
+    target_link_options(NFSHP2 PRIVATE "LINKER:--wrap=pthread_create" "LINKER:-u,__wrap_pthread_create")
+    set_target_properties(NFSHP2 PROPERTIES OUTPUT_NAME "NFSHP2-Switch2")
+    set(hp2_nacp_name "Need for Speed: Hot Pursuit 2 - Switch 2")
+else()
+    set_target_properties(NFSHP2 PROPERTIES OUTPUT_NAME "NFSHP2-Switch")
+    set(hp2_nacp_name "Need for Speed: Hot Pursuit 2")
+endif()
+nx_generate_nacp(OUTPUT NFSHP2.nacp NAME "${hp2_nacp_name}"
     AUTHOR "HDErick" VERSION "1.0")
 find_program(HP2_ICON_PYTHON NAMES python3 python REQUIRED)
 set(HP2_PIPELINE_CACHE_SEED "${CMAKE_CURRENT_SOURCE_DIR}/VulkanPipelineCache.bin")
 set(HP2_PIPELINE_CACHE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/pipeline_cache_seed.inc")
-add_custom_command(OUTPUT "${HP2_PIPELINE_CACHE_HEADER}"
-    COMMAND "${HP2_ICON_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/nx/embed_pipeline_cache.py"
-        "${HP2_PIPELINE_CACHE_SEED}" "${HP2_PIPELINE_CACHE_HEADER}"
-    DEPENDS "${HP2_PIPELINE_CACHE_SEED}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/nx/embed_pipeline_cache.py"
-    VERBATIM)
-target_sources(NFSHP2Core PRIVATE src/nx/pipeline_cache.cpp "${HP2_PIPELINE_CACHE_HEADER}")
+if(NOT NINTENDO_SWITCH2)
+    add_custom_command(OUTPUT "${HP2_PIPELINE_CACHE_HEADER}"
+        COMMAND "${HP2_ICON_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/nx/embed_pipeline_cache.py"
+            "${HP2_PIPELINE_CACHE_SEED}" "${HP2_PIPELINE_CACHE_HEADER}"
+        DEPENDS "${HP2_PIPELINE_CACHE_SEED}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/nx/embed_pipeline_cache.py"
+        VERBATIM)
+    target_sources(NFSHP2Core PRIVATE "${HP2_PIPELINE_CACHE_HEADER}")
+endif()
+target_sources(NFSHP2Core PRIVATE src/nx/pipeline_cache.cpp)
 set(HP2_BUTTONS_PNG "${CMAKE_CURRENT_SOURCE_DIR}/buttons.png")
 set(HP2_BUTTONS_HEADER "${CMAKE_CURRENT_BINARY_DIR}/buttons_png.inc")
 add_custom_command(OUTPUT "${HP2_BUTTONS_HEADER}"

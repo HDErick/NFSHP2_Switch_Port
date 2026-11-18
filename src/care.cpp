@@ -85,7 +85,7 @@ std::size_t carRenderNativeDetailLod(const EditorMarkerModel* models,
 {
     constexpr float minimumPixels[4]={120.0f,45.0f,20.0f,0.0f}; // PAL2AD0E8
     const auto detailPixels=hp2::nativeDetailLodPixels(originalPixels,
-        hp2::nativeVehicleDetailDistanceFactor);
+        hp2::nativeSceneQuality().vehicleLod);
     std::size_t lod=0;
     while(lod<3 && static_cast<float>(detailPixels)<minimumPixels[lod] &&
         models[lod+1].solid)++lod;
@@ -1256,13 +1256,10 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     float inverse[16],localEye[4];vectorMatrixInverseAffine(inverse,transform);
     eMulVector3(localEye,inverse,view.view->current.eye);
     carPartCullerCull(render.cullers.data(),localEye);
-    // The Switch limits mesh and secondary pass work for AI race opponents.
-#ifdef __SWITCH__
-    const bool reducedDetail=car && car->driverInfo->driverClass==2 &&
+    // Switch 1 and the Switch 2 high-FPS profile limit AI secondary work.
+    const bool reducedDetail=hp2::nativeSceneQuality().reducedOpponents && car &&
+        car->driverInfo->driverClass==2 &&
         (!render.bindings->applicationState || *render.bindings->applicationState!=3);
-#else
-    constexpr bool reducedDetail=false;
-#endif
     std::size_t lod=carRenderNativeDetailLod(render.models.data(),reducedDetail?pixels/2:pixels);
     if(reducedDetail && lod==0 && render.models[1].solid)lod=1;
     std::size_t wheelLod=lod;

@@ -15,3 +15,16 @@
 *.gcda
 *.gcno
 *.stream
+
+# External graphics SDKs/drivers must never be vendored or pushed.
+**/mesa*/
+*mesa*.zip
+*mesa*.tar.*
+*.a
+*.so
+*.so.*
+*.dll.a
+
+# Generated installer snapshots and downloaded release binaries
+/_site/
+/installer/release/

@@ -832,6 +832,10 @@ bool ApplicationRuntime::Tick()
     bool eventsReady{};
     {platform::ScopedNativeDuration measure(s.slowFrame.poll);eventsReady=s.host.PollEvents();}
     if(!eventsReady || s.demo.ExitRequested() || applicationDebugExitRequested)return false;
+#ifdef __SWITCH2__
+    // Menu changes apply before capture; retained draws cannot keep the old LOD.
+    if(configureNativeFrameLimitQuality(nx::userSettings.frameLimit))s.InvalidatePreparedScene();
+#endif
     if(s.presentationTimingEpoch!=s.host.PresentationTimingEpoch()) {
         s.presentationTimingEpoch=s.host.PresentationTimingEpoch();
         const auto resumed=s.host.FrameTime();

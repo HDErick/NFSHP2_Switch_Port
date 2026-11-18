@@ -549,7 +549,7 @@ float sceneryNativeDistanceSquaredFootprintXY(const float bounds[4],
 bool sceneryNativeNearDetailState(float distanceSquared,bool previous) noexcept
 {
     if(!std::isfinite(distanceSquared) || distanceSquared<0.0f)return false;
-    const float reach=previous ? nativeSceneryNearDetailExitXY : nativeSceneryNearDetailEnterXY;
+    const float reach=previous ? nativeSceneQuality().nearDetailExit : nativeSceneQuality().nearDetailEnter;
     return distanceSquared<=reach*reach;
 }
 
@@ -594,7 +594,7 @@ std::size_t sceneryNativeSelectDetailLod(const SceneryModel& model,
         if(originalPixels>=model.minimumPixels[visibleLod] && model.levels[visibleLod].solid)break;
     if(visibleLod==3)return visibleLod;
     const auto detailPixels=nativeDetailLodPixels(originalPixels,
-        nativeSceneryDetailDistanceFactor);
+        nativeSceneQuality().sceneryLod);
     std::size_t lod=0;
     for(;lod<visibleLod;++lod)
         if(detailPixels>=model.minimumPixels[lod] && model.levels[lod].solid)break;
@@ -605,7 +605,7 @@ std::size_t sceneryNativeSelectDetailLod(const SceneryModel& model,
     // PAL visibility cutoff has already run in the caller, unchanged.
     if(lod>0 && model.levels[0].solid && std::isfinite(distanceToSurface) &&
         distanceToSurface>=0.0f &&
-        distanceToSurface<=nativeSceneryHighDetailSurfaceDistance)return 0;
+        distanceToSurface<=nativeSceneQuality().highDetailSurface)return 0;
     return lod;
 }
 

@@ -6,6 +6,7 @@
 
 #ifdef __cplusplus
 #include "indep/inc/Timer.hpp"
+#include "indep/inc/NativeRenderSettings.hpp"
 #include <array>
 #include <deque>
 #include <memory>
@@ -944,6 +945,7 @@ public:
     void CaptureDisplayOffsets(const GameTime& clock);
     void SetPresentationAdvance(bool advance) noexcept {advancesPresentation_=advance;}
     bool AdvancesPresentation() const noexcept {return advancesPresentation_;}
+    std::uint32_t CapturedEnvironmentFaces() const noexcept {return environmentCameraFaces_;}
     const std::array<double,2>& DisplayTranslation() const noexcept {return displayTranslation_;}
     const std::array<std::uint32_t,2>& SourceDisplayExtent() const noexcept {return sourceDisplayExtent_;}
     float TextureTime() const noexcept {return textureTime_;}
@@ -1119,6 +1121,12 @@ private:
 // 1920x1080 color copy is not required for ordinary (non-FXAA) race frames.
 // The policy is derived from the real sealed draw list, not a guess about
 // track/world state; it is also testable without a physical GPU.
+// A persistent reflection image is blended once per new camera capture,
+// including captures between logical ticks under a presentation cap.
+inline constexpr bool EcstasyAdvanceEnvironmentImages(bool hasPrevious,bool freshFrame,
+    bool logicalTick,std::uint32_t capturedFaces) noexcept {
+    return !hasPrevious || (freshFrame && (logicalTick || capturedFaces!=0));
+}
 struct EcstasyNativeHistoryReaders {
     bool display{};
     bool environment{};
@@ -1505,19 +1513,6 @@ void graphicsNotifyPresentationComplete() noexcept;
 #include "indep/inc/eMath.hpp"
 
 namespace hp2 {
-#ifdef __SWITCH__
-inline constexpr float nativeSceneryDetailDistanceFactor = 1.0f;
-inline constexpr float nativeVehicleDetailDistanceFactor = 1.75f;
-inline constexpr float nativeSceneryHighDetailSurfaceDistance = 35.0f;
-inline constexpr float nativeSceneryNearDetailEnterXY = 35.0f;
-inline constexpr float nativeSceneryNearDetailExitXY = 50.0f;
-#else
-inline constexpr float nativeSceneryDetailDistanceFactor = 3.0f;
-inline constexpr float nativeVehicleDetailDistanceFactor = 2.5f;
-inline constexpr float nativeSceneryHighDetailSurfaceDistance = 125.0f;
-inline constexpr float nativeSceneryNearDetailEnterXY = 125.0f;
-inline constexpr float nativeSceneryNearDetailExitXY = 165.0f;
-#endif
 // Use the nearest scenery envelope for the high-detail guard. XY distance
 // avoids distant vertical extents, and entry/exit hysteresis reduces popping.
 // Beyond the guard, authored screen-space thresholds select existing meshes.

@@ -1,6 +1,18 @@
 # The Windows checkout includes the Khronos C headers and a loader import
 # library. Driver/runtime installation belongs to the graphics driver.
-if(NINTENDO_SWITCH)
+if(NINTENDO_SWITCH2)
+    set(HP2_SWITCH2_MESA_SDK "" CACHE PATH "External Switch 2 Horizon Mesa SDK (portlibs/switch2 directory)")
+    if(NOT EXISTS "${HP2_SWITCH2_MESA_SDK}/lib/libmesa_vulkan.a")
+        message(FATAL_ERROR "Set HP2_SWITCH2_MESA_SDK to an external Switch 2 Mesa SDK; drivers are not vendored")
+    endif()
+    find_package(Vulkan REQUIRED CONFIG PATHS "${HP2_SWITCH2_MESA_SDK}/lib/cmake/Vulkan" NO_DEFAULT_PATH)
+    # libpng comes from Switch 1 portlibs, which also contains Vulkan headers.
+    # Keep the external Switch 2 SDK headers ahead of that shared include path.
+    set_property(TARGET Vulkan::Vulkan PROPERTY IMPORTED_NO_SYSTEM TRUE)
+    target_include_directories(NFSHP2Core BEFORE PUBLIC "${HP2_SWITCH2_MESA_SDK}/include")
+    # The SDK's libvulkan.a is an ld script; resolve its archives ahead of OunceVK.
+    target_link_directories(NFSHP2Core PUBLIC "${HP2_SWITCH2_MESA_SDK}/lib" "${DEVKITPRO}/portlibs/switch/lib")
+elseif(NINTENDO_SWITCH)
     find_path(HP2_SWITCH_VULKAN_INCLUDE vulkan/vulkan_vi.h REQUIRED)
     find_library(HP2_SWITCH_VULKAN_LIBRARY vulkan REQUIRED)
     add_library(Vulkan::Vulkan STATIC IMPORTED)

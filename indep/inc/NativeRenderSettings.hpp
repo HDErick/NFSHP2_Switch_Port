@@ -7,7 +7,7 @@
 
 namespace hp2 {
 struct NativeRenderSettings {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && !defined(__SWITCH2__)
     float drawDistanceScale{0.3f};
     float mirrorDistanceScale{0.5f};
 #else
@@ -17,7 +17,7 @@ struct NativeRenderSettings {
 };
 inline NativeRenderSettings validateNativeRenderSettings(NativeRenderSettings value) noexcept
 {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && !defined(__SWITCH2__)
     // The Switch port uses one fixed scene profile, including legacy configs.
     value.drawDistanceScale=0.3f;value.mirrorDistanceScale=0.5f;
 #else
@@ -44,6 +44,33 @@ inline float nativeViewDistanceScale(std::int32_t viewId) noexcept
 {
     return viewId==3 ? nativeRenderSettings().mirrorDistanceScale :
         viewId==1 || viewId==2 ? nativeRenderSettings().drawDistanceScale:1.0f;
+}
+
+// Updated only at application-frame boundaries, before scene workers run.
+struct NativeSceneQuality {
+    float sceneryLod,vehicleLod,highDetailSurface,nearDetailEnter,nearDetailExit;
+    bool reducedOpponents;
+};
+inline constexpr NativeSceneQuality switchSceneQuality{1.0f,1.75f,35.0f,35.0f,50.0f,true};
+inline constexpr NativeSceneQuality upstreamSceneQuality{3.0f,2.5f,125.0f,125.0f,165.0f,false};
+#if defined(__SWITCH__) && !defined(__SWITCH2__)
+inline NativeSceneQuality nativeSceneQualityStorage=switchSceneQuality;
+#else
+inline NativeSceneQuality nativeSceneQualityStorage=upstreamSceneQuality;
+#endif
+inline const NativeSceneQuality& nativeSceneQuality() noexcept {return nativeSceneQualityStorage;}
+inline bool configureNativeFrameLimitQuality(int limit) noexcept {
+#ifdef __SWITCH2__
+    const bool reduced=limit==120 || limit==0;
+    if(nativeSceneQualityStorage.reducedOpponents==reduced)return false;
+    nativeSceneQualityStorage=reduced ? switchSceneQuality:upstreamSceneQuality;
+    // Keep the larger main distance even in the high-FPS scene profile.
+    nativeRenderSettingsStorage.drawDistanceScale=1.0f;
+    nativeRenderSettingsStorage.mirrorDistanceScale=reduced ? 0.5f:1.0f;
+    return true;
+#else
+    (void)limit;return false;
+#endif
 }
 
 inline constexpr std::uint32_t nativeGpuSceneryClipMaximumStrips=32;
