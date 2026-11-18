@@ -148,7 +148,13 @@ void EnvironmentMap::UpdateCameras(const float viewEye[3],const float reflection
     eTransposeMatrix(orientation,baseline);eMulMatrix(orientation,towardOrigin,orientation);
     rotationOnly(orientation);eTransposeMatrix(orientation,orientation);
     const std::size_t bank=applicationState==3 ? 0:1;
+#if defined(__SWITCH__) && !defined(__SWITCH2__)
+    // Use the split-screen round-robin schedule in solo play too: one face
+    // per source refresh, keeping the union pending until a frame submits.
+    constexpr bool primary=false;
+#else
     const bool primary=views_.presentationLayout==1 || views_.presentationLayout==2;
+#endif
     std::array<bool,6> due{};
     const auto select=[&](std::uint32_t phase) {
         for(std::size_t face=0;face<6;++face)

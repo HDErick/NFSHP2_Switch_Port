@@ -164,7 +164,8 @@ legacy `language=` entries are ignored.
 
 
 Main-view draw distance is fixed at **0.3×**, mirror distance at **0.5×**, and
-normal scene quality is retained. Vehicle LOD uses **1.75×** and scenery keeps
+normal scene quality is retained. Switch 1 solo play uses the slower split-screen
+reflection refresh schedule, updating one camera face per source refresh. Vehicle LOD uses **1.75×** and scenery keeps
 the **35/50** near-detail range. FPS no longer changes distance, LOD policy,
 shadows or reflections. Legacy `adaptive_draw_distance` and `test_low_quality`
 config entries are ignored; no config edit is needed after updating.
