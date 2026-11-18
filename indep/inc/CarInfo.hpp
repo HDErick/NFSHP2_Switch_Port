@@ -480,7 +480,7 @@ std::size_t carRenderScene(Car& car,const CarCinematicScreen& view,hp2::EcstasyF
     const float brakes[4][16],std::int32_t worldFrames,std::int32_t presentationLayout);
 void RenderCars(World& world,const CarCinematicScreen& view,hp2::EcstasyFrame& frame,
     const GameTime& clock,std::int32_t presentationLayout,
-    const hp2::CarDamageDisplayBindings* damageDisplay,CarViewMoverRegistry* views);
+    const hp2::CarDamageDisplayBindings* damageDisplay,CarViewMoverRegistry* views,bool emitGeometry=true);
 // PAL1242A8/123570: the attached camera's authored DASHGEOM pass, after
 // rear-view composition and before fog. Geometry retains its loaded owner.
 std::size_t RenderDashboards(const CarCinematicScreen& view,hp2::EcstasyFrame& frame,

@@ -4,6 +4,10 @@
 #include "NativeAudioProfileValidation.hpp"
 #include "CarLoader.hpp"
 #include "Timer.hpp"
+#ifdef __SWITCH__
+#include "src/nx/config.hpp"
+#include "src/nx/display_options.hpp"
+#endif
 #include <tuple>
 #include "bware/inc/bWare.hpp"
 #include "bware/inc/bMath.hpp"
@@ -442,11 +446,19 @@ public:
     }
 private:
     void CommitLanguage() {
+        char detail[96]{};
+        std::snprintf(detail,sizeof(detail),"requested=%d startup=%d",selected_,preFrontend_?1:0);
+        platform::RecordSessionEvent("language.selected",detail);
         services_.ui->language->SetLanguage(selected_);
         if(preFrontend_ && services_.ui->language->currentLanguage!=-1) {
             services_.frontend->InitWithDefaults(*services_.raceSetup);
             if(services_.sounds)services_.frontend->CaptureAudioOptions(*services_.sounds,true);
         }
+#ifdef __SWITCH__
+        nx::userSettings.language=selected_;
+        services_.frontend->currentLanguage=selected_;
+        nx::SaveUserSettings();
+#endif
     }
     MainMenuScreenServices& services_;
     std::uint32_t screen_{};
@@ -646,12 +658,22 @@ public:
             0x52e039f6u,0x52e039f7u,0x52e039f8u,0x52e039f9u,0x52e039fau,0x52e039fbu,
             0x55cb09f2u,0x2e931f1bu,0x03d90172u,0x5610f2f4u,0x8fe4086bu,0x422313cbu};
         scrolling_.AddObjects(objects,std::size(objects));scrolling_.SetItemCount(9);
+#ifdef __SWITCH__
+        for(const auto key:{nx::FrameLimitItem(screen),nx::ShowFpsItem(screen),nx::frameLimitValue,nx::showFpsValue})scrolling_.AddObject(key);
+        scrolling_.SetItemCount(11);
+        scrolling_.SetVisibleArea(nx::FrameLimitItem(screen),MenuFirst63+4);
+#endif
         // Final1F354C/1F3564 set the same real clipping polygon on both arrows.
         for(const auto key:{0xd1cda594u,0x9345e4a7u}) {
             auto* object=services.ui->resources->FindObject(screen,key);
             if(!object)continue;
             object->SetClipToPoly(0xc67cfb4au);
         }
+    }
+    ~DisplayOptionsScreen() override {
+#ifdef __SWITCH__
+        nx::SaveUserSettings();
+#endif
     }
     void HandleHighlight(ScreenMessage,ScreenCallbackData&,std::uint32_t) override {}
     void Redraw(std::size_t index)
@@ -685,6 +707,11 @@ public:
         auto& state=*state_;auto& services=state.services;auto& ui=*services.ui;
         scrolling_.HandleEvent(message,data);arrows_.HandleEvent(message,data);
         if(message==ScreenMessage::Left || message==ScreenMessage::Right) {
+#ifdef __SWITCH__
+            if(nx::HandleDisplaySetting(*ui.resources,state.screen,data.key,message==ScreenMessage::Left?-1:1)) {
+                data.sound=1;state.selectionChange.ForceStart();return;
+            }
+#endif
             if(data.key>=MenuFirst63 && data.key<MenuFirst63+6) {
                 const auto index=data.key-MenuFirst63;
                 const auto direction=message==ScreenMessage::Left?-1:1;
@@ -709,13 +736,29 @@ public:
         } else if(message==ScreenMessage::Highlight) {
             constexpr std::int32_t blurbs[]={0x24cac,0x24cad,0x24cae,0x24caf,0x24cb1,0x24cb2,0x24cb3,0x24cb4,0x24cb5};
             const auto index=data.key-MenuFirst63;
-            const auto value=index<Values.size()?Values[index]:0;
+            auto value=index<Values.size()?Values[index]:0;
+#ifdef __SWITCH__
+            if(data.key==nx::FrameLimitItem(state.screen))value=nx::frameLimitValue;
+            if(data.key==nx::ShowFpsItem(state.screen))value=nx::showFpsValue;
+#endif
             if(index>=6)state.selectionChange.SetCurrentMenuItem(0);
-            blurb_.NewText(index<std::size(blurbs)?blurbs[index]:0);
+            if(index<std::size(blurbs))blurb_.NewText(blurbs[index]);
+#ifdef __SWITCH__
+            else if(data.key==nx::FrameLimitItem(state.screen))
+                blurb_.NewText("Set the gameplay frame rate limit. Uncapped allows the highest available frame rate.");
+            else if(data.key==nx::ShowFpsItem(state.screen))
+                blurb_.NewText("Show or hide the frame rate counter.");
+#endif
+            else blurb_.NewText("");
             state.selectionChange.SetCurrentMenuItem(value);arrows_.SetCurrentItem(value);
             OptionsScreenBase::HandleHighlight(message,data,scrolling_.GetCurrentMenuMask());
-        } else if((message==ScreenMessage::Previous && data.key==MenuFirst63) ||
-                  (message==ScreenMessage::Next && data.key==MenuFirst63+8))data.value=1;
+        } else if((message==ScreenMessage::Previous && data.key==
+#ifdef __SWITCH__
+                   nx::FrameLimitItem(state.screen)
+#else
+                   MenuFirst63
+#endif
+                  ) || (message==ScreenMessage::Next && data.key==MenuFirst63+8))data.value=1;
         else if(message==ScreenMessage::Select) {
             const char* destination=nullptr;
             if(data.key==MenuFirst63+6)destination="Customize P1 HUD";

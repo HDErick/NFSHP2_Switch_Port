@@ -1,6 +1,14 @@
 # The Windows checkout includes the Khronos C headers and a loader import
 # library. Driver/runtime installation belongs to the graphics driver.
-if(WIN32 AND MSVC)
+if(NINTENDO_SWITCH)
+    find_path(HP2_SWITCH_VULKAN_INCLUDE vulkan/vulkan_vi.h REQUIRED)
+    find_library(HP2_SWITCH_VULKAN_LIBRARY vulkan REQUIRED)
+    add_library(Vulkan::Vulkan STATIC IMPORTED)
+    set_target_properties(Vulkan::Vulkan PROPERTIES
+        IMPORTED_LOCATION "${HP2_SWITCH_VULKAN_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${HP2_SWITCH_VULKAN_INCLUDE}"
+        INTERFACE_LINK_LIBRARIES "elf;expat;z;zstd;nx;m")
+elseif(WIN32 AND MSVC)
     set(_hp2_vulkan "${CMAKE_CURRENT_LIST_DIR}/../third_party/vulkan")
     foreach(_hp2_file IN ITEMS include/vulkan/vulkan.h lib/x64/vulkan-1.lib)
         if(NOT EXISTS "${_hp2_vulkan}/${_hp2_file}")

@@ -192,6 +192,11 @@ void LanguageManager::SetLanguage(std::int32_t language)
         }
     }
     HandleLanguageChange(currentLanguage,previous);
+    char detail[256]{};
+    std::snprintf(detail,sizeof(detail),"previous=%d current=%d strings=%zu speech_loaded=%d bytes=%zu file=%s",
+        previous,currentLanguage,StringCount(),textEnabled,loadedFileBytes_,
+        currentLanguage>=0 ? languageFiles[static_cast<std::size_t>(currentLanguage)]:"none");
+    platform::RecordSessionEvent("language.applied",detail);
 }
 
 void LanguageManager::HandleLanguageChange(std::int32_t current,std::int32_t previous)

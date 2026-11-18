@@ -262,7 +262,7 @@ void prepareSkidQuads(hp2::SkidResources& skids,const WheelTrail& trail,std::uin
 }
 void wheelTrailPrepareRender(hp2::SkidResources& skids,WheelTrail* first,
     const float matrix[16],const CarCinematicScreen& screen,std::vector<hp2::SkidRenderQuad>& output,
-    bool advanceState)
+    bool advanceState,bool emitGeometry)
 {
     hp2::Require(matrix && screen.view,"RenderSkids requires its original live view");
     if(screen.replayComposition)return;
@@ -289,10 +289,12 @@ void wheelTrailPrepareRender(hp2::SkidResources& skids,WheelTrail* first,
         const float distance=sqrtf((x*x+y*y)+z*z);
         const auto pixels=ecstasyViewPixelSize(&screen,1.0f,distance);
         if(pixels<=4)continue;
-        std::uint8_t fade=0;
-        if(pixels<10)fade=static_cast<std::uint8_t>(static_cast<std::uint32_t>(
-            convertFloatToInt32(256.0f-(static_cast<float>(pixels)-4.0f)*42.66666793823242f)));
-        prepareSkidQuads(skids,*trail,fade,output);
+        if(emitGeometry) {
+            std::uint8_t fade=0;
+            if(pixels<10)fade=static_cast<std::uint8_t>(static_cast<std::uint32_t>(
+                convertFloatToInt32(256.0f-(static_cast<float>(pixels)-4.0f)*42.66666793823242f)));
+            prepareSkidQuads(skids,*trail,fade,output);
+        }
         // Visibility still touches the source LRU on a logical presentation.
         // Extra displayed frames must not change which live trail is evicted.
         if(advanceState)trail->creation=++skids.Trails().revision;

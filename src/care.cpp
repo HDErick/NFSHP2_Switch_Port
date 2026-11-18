@@ -23,6 +23,7 @@
 #include "indep/inc/CameraCoordinator.hpp"
 #include <cassert>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <memory>
 
@@ -1095,11 +1096,12 @@ std::size_t renderCarSunShadow(CarAppearance& render,Car* car,const CarCinematic
     constexpr float edgeU=0.1550000011920929f;std::size_t submitted=0;
     for(std::size_t i=0;i+1<(count&~std::size_t{1});i+=2) {
         frame.RenderWorldStrip({vertex(smooth[i],edgeU),vertex(center,0.0f),
-            vertex(smooth[i+1],edgeU),vertex(smooth[(i+2)%count],edgeU)},*texture,eMathIdentityMatrix,view);++submitted;
+            vertex(smooth[i+1],edgeU),vertex(smooth[(i+2)%count],edgeU)},
+            *texture,eMathIdentityMatrix,view,hp2::EcstasyCarShadow::Sun);++submitted;
     }
     if(count&1u) {
         frame.RenderWorldStrip({vertex(smooth.back(),edgeU),vertex(center,0.0f),vertex(smooth.front(),edgeU)},
-            *texture,eMathIdentityMatrix,view);++submitted;
+            *texture,eMathIdentityMatrix,view,hp2::EcstasyCarShadow::Sun);++submitted;
     }
     const auto third=count/3;
     std::vector<hp2::frontend::FlailerPolyVertex> strip;strip.reserve((third+3)*2);
@@ -1111,7 +1113,7 @@ std::size_t renderCarSunShadow(CarAppearance& render,Car* car,const CarCinematic
             outer[0]=feather*(point[0]-center[0])+center[0];outer[1]=feather*(point[1]-center[1])+center[1];
             strip.push_back(vertex(point,edgeU));strip.push_back(vertex(outer,1.0f));
         }
-        frame.RenderWorldStrip(strip,*texture,eMathIdentityMatrix,view);++submitted;
+        frame.RenderWorldStrip(strip,*texture,eMathIdentityMatrix,view,hp2::EcstasyCarShadow::Sun);++submitted;
     }
     return submitted;
 }
@@ -1204,7 +1206,7 @@ std::size_t renderCarRoadShadow(CarAppearance& render,Car* car,const CarCinemati
             std::copy(points[index].begin(),points[index].begin()+3,vertex.position.begin());
             vertex.textureCoordinate={uv[index][0],uv[index][1],1.0f};vertex.color=color;strip.push_back(vertex);
         }
-        frame.RenderWorldStrip(strip,*texture,eMathIdentityMatrix,view);++submitted;
+        frame.RenderWorldStrip(strip,*texture,eMathIdentityMatrix,view,hp2::EcstasyCarShadow::Road);++submitted;
     }
     return submitted;
 }
@@ -1254,7 +1256,15 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     float inverse[16],localEye[4];vectorMatrixInverseAffine(inverse,transform);
     eMulVector3(localEye,inverse,view.view->current.eye);
     carPartCullerCull(render.cullers.data(),localEye);
-    std::size_t lod=carRenderNativeDetailLod(render.models.data(),pixels);
+    // The Switch limits mesh and secondary pass work for AI race opponents.
+#ifdef __SWITCH__
+    const bool reducedDetail=car && car->driverInfo->driverClass==2 &&
+        (!render.bindings->applicationState || *render.bindings->applicationState!=3);
+#else
+    constexpr bool reducedDetail=false;
+#endif
+    std::size_t lod=carRenderNativeDetailLod(render.models.data(),reducedDetail?pixels/2:pixels);
+    if(reducedDetail && lod==0 && render.models[1].solid)lod=1;
     std::size_t wheelLod=lod;
     // PAL121338..121368: Car+3BC is CarState+37C, the live ground-contact
     // count. Appearance+8F8 is culler12's +18 predicate (760+12*20+18).
@@ -1277,6 +1287,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
         "Car/tire LOD override is outside its authored mesh domain");
     if(bodyOverride!=-1)lod=static_cast<std::size_t>(bodyOverride);
     if(wheelOverride!=-1)wheelLod=static_cast<std::size_t>(wheelOverride);
+    else if(reducedDetail && render.models[8].solid && render.models[9].solid)wheelLod=2;
     // This is the source raw +18 predicate. Its historical native name
     // 'culled' is retained to avoid changing already-audited owner layout.
     const auto part=[&](std::size_t index){return render.cullers[index].culled!=0;};
@@ -1300,7 +1311,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     const auto bodyLighting=lightContexts.Setup(transform,
         frame.EnvironmentMatrix(),view.view->current.eye,view,applicationState);
     const std::uint32_t environmentFlags=
-        hp2::environmentMappingEnabled && pixels>=18 ? 0u:1u;
+        !reducedDetail && hp2::environmentMappingEnabled && pixels>=18 ? 0u:1u;
     const auto draw=[&](std::size_t slot,const float* matrix,std::uint32_t flags=0u,float alpha=1.0f) {
         std::optional<hp2::SceneLightContext> partLighting;
         const hp2::SceneLightContext* context=nullptr;
@@ -1316,7 +1327,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     std::size_t submitted=renderCarLightFlares(render,car,view,frame,transform,worldFrames,lightFlags);
     // PAL121A84..121D10: use the same appearance/character owner, original
     // pixel thresholds, passenger-seat offset and front-facing detail rule.
-    if(car && car->driverVisible && car->visual && car->driverInfo && view.id!=3 && !car->visual->replaySuppressed) {
+    if(!reducedDetail && car && car->driverVisible && car->visual && car->driverInfo && view.id!=3 && !car->visual->replaySuppressed) {
         auto& driver=*car->visual;
         hp2::Require(driver.bindings.vehicle && render.definition && render.textures,
             "Car driver rendering lost its authored appearance owners");
@@ -1353,9 +1364,14 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
         const auto* terrain=movement && movement->bindings.environment ?
             movement->bindings.environment->contact.terrain:nullptr;
         CarShadowTerrain shadowTerrain(terrain);
-        submitted+=renderCarSunShadow(render,car,view,frame,transform,bodyLighting,frontend,shadowLod,visibilityPixels,
+        using Clock=std::chrono::steady_clock;
+        const auto sunStarted=Clock::now();
+        if(!reducedDetail)submitted+=renderCarSunShadow(render,car,view,frame,transform,bodyLighting,frontend,shadowLod,visibilityPixels,
             shadowTerrain);
+        const auto roadStarted=Clock::now();
         submitted+=renderCarRoadShadow(render,car,view,frame,transform,&bodyLighting,frontend,shadowTerrain);
+        frame.RecordCarShadowCapture(std::chrono::duration<double,std::milli>(roadStarted-sunStarted).count(),
+            std::chrono::duration<double,std::milli>(Clock::now()-roadStarted).count());
     }
     submitted+=draw(lod,drawTransform,environmentFlags);
     const auto* damage=carRenderDamage(car);
@@ -1387,7 +1403,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
         // PAL123024..1231B0: blur is an additional authored wheel model,
         // not a substitute mesh. Reuse each wheel's calculated matrix/light
         // context and preserve the original left-side, right-side order.
-        if(wheelLod<2 && !frontend && car) {
+        if(!reducedDetail && wheelLod<2 && !frontend && car) {
             const auto* movement=car->Movement();
             hp2::Require(movement && movement->bindings.state,"Wheel blur lost its physical wheel state");
             constexpr std::size_t order[4]={0,3,1,2};
@@ -1400,7 +1416,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
                     view,sourceFlags|1u,1.0f,worldFrames,&context);
             }
         }
-        if(lod<2) {
+        if(!reducedDetail && lod<2) {
             float reversed[16];eIdentity(reversed);reversed[5]=-1.0f;
             for(std::size_t wheel=0;wheel<4;++wheel)if(frontend || part(wheel+6)) {
                 float local[16],world[16];
@@ -1413,7 +1429,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     }
     // Source wiper animation uses the same frame timer window and encoded
     // rigid animation start; RenderModel evaluates its real animation tree.
-    if(pixels>40 && car)if(auto* carFrame=car->Frame()) {
+    if(!reducedDetail && pixels>40 && car)if(auto* carFrame=car->Frame()) {
         const auto& state=carFrame->state;
         const bool active=state.signalWindowLocked ||
             (worldFrames>=state.signalWindowStart && worldFrames<state.signalWindowEnd);
@@ -1632,7 +1648,7 @@ void UpdateEnvironmentMapCameras(EnvironmentMap& environment,CarCinematicService
 
 void RenderCars(World& world,const CarCinematicScreen& view,hp2::EcstasyFrame& frame,
     const GameTime& clock,std::int32_t presentationLayout,
-    const hp2::CarDamageDisplayBindings* damageDisplay,CarViewMoverRegistry* views)
+    const hp2::CarDamageDisplayBindings* damageDisplay,CarViewMoverRegistry* views,bool emitGeometry)
 {
     // PAL124060..1242A4: intrusive World list, hidden camera car, original
     // view-mask cells, physical wheel matrices and subsequent DamageAbove.
@@ -1658,15 +1674,17 @@ void RenderCars(World& world,const CarCinematicScreen& view,hp2::EcstasyFrame& f
         if(!((motion.wheelEffectsFlags>>view.id)&1u))visible=false;
         if(!visible)continue;
         --budget;
-        float wheels[4][16],brakes[4][16];car->GetRenderingWheelAndBrakeMatrices(wheels,brakes,view.id);
-        const bool overridePose=((motion.wheelExclusionMask>>view.id)&1u)!=0;
-        const auto* presentation=overridePose && views ? carViewMoverPresentation(views,car):nullptr;
-        hp2::Require(!overridePose || (presentation && presentation->motion==&motion),
-            "NIS rendering override has no canonical replay presentation owner");
-        // PAL1241B0 supplies Car+50 (COM-adjusted model origin), not Car+60.
-        const auto* position=overridePose ? presentation->centerPosition:mover->bindings.state->centerPosition;
-        const auto* orientation=overridePose ? presentation->orientation:mover->bindings.state->orientation;
-        carRenderScene(*car,view,frame,position,orientation,wheels,brakes,clock.worldTimeFrames,presentationLayout);
+        if(emitGeometry) {
+            float wheels[4][16],brakes[4][16];car->GetRenderingWheelAndBrakeMatrices(wheels,brakes,view.id);
+            const bool overridePose=((motion.wheelExclusionMask>>view.id)&1u)!=0;
+            const auto* presentation=overridePose && views ? carViewMoverPresentation(views,car):nullptr;
+            hp2::Require(!overridePose || (presentation && presentation->motion==&motion),
+                "NIS rendering override has no canonical replay presentation owner");
+            // PAL1241B0 supplies Car+50 (COM-adjusted model origin), not Car+60.
+            const auto* position=overridePose ? presentation->centerPosition:mover->bindings.state->centerPosition;
+            const auto* orientation=overridePose ? presentation->orientation:mover->bindings.state->orientation;
+            carRenderScene(*car,view,frame,position,orientation,wheels,brakes,clock.worldTimeFrames,presentationLayout);
+        }
         if(damageDisplay) {
             bool suppress=false;
             for(int32_t i=0;i<damageDisplay->players.count;++i)if(const auto* player=damageDisplay->players.players[i])

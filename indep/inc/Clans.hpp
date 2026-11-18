@@ -59,7 +59,7 @@ public:
     // RenderClans plus RenderSkids visibility/order and source ePoly geometry.
     // DisplayFrame consumes this geometry at the original PAL1132C4 call site.
     void PrepareRender(const float matrix[16],const CarCinematicScreen& screen,
-        std::vector<SkidRenderQuad>& output,bool advanceState=true);
+        std::vector<SkidRenderQuad>& output,bool advanceState=true,bool emitGeometry=true);
 private:
     std::unique_ptr<WheelTrailClanOwner> owner_;
 };
@@ -82,6 +82,6 @@ inline void wheelTrailClanExpand(WheelTrailStore* store,WheelTrail* trail) noexc
 }
 void wheelTrailPrepareRender(hp2::SkidResources& skids,WheelTrail* first,
     const float matrix[16],const CarCinematicScreen& screen,std::vector<hp2::SkidRenderQuad>& output,
-    bool advanceState=true);
+    bool advanceState=true,bool emitGeometry=true);
 
 #endif

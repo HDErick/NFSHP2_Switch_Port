@@ -19,6 +19,9 @@ struct FlailerStrip {
     bool deleteRequested{};
     const EditorMarkerTexture* texture{};
     float alphaScale{};
+#ifdef __SWITCH__
+    int buttonGlyphLayout{-1};
+#endif
     std::uint32_t renderedFrames{};
     EcstasyUiPlacement uiPlacement{EcstasyUiPlacement::OriginalCanvas};
     std::unique_ptr<FlailerStrip> nextTexture;
@@ -91,6 +94,10 @@ public:
     // These searches preserve the original ordered package/screen cache.
     FlailerScreenResource* FindScreen(std::uint32_t key);
     FlailerObjectChunk* FindObject(std::uint32_t screenKey,std::uint32_t objectKey,std::int32_t kind=0);
+#ifdef __SWITCH__
+    void AddNativeText(std::uint32_t screen,std::uint32_t source,std::uint32_t key,
+        std::uint32_t parent,const char* caption,float x,float y);
+#endif
     void SetTextColor(std::uint32_t screenKey,std::uint32_t objectKey,std::uint32_t rgb);
     std::int32_t Printf(std::uint32_t screenKey,std::uint32_t objectKey,const char* format,...);
     // A completed localized field may exceed the console's authored byte

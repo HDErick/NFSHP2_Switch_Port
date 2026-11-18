@@ -73,7 +73,7 @@ const float* SkyResources::Transform(std::size_t index) const
     Require(index<transforms_.size(),"Sky transform index is outside its source bank");return transforms_[index].data();
 }
 void SkyResources::StuffSky(const CarCinematicScreen& view,EcstasyFrame& frame,
-    std::int32_t worldFrames) const
+    std::int32_t worldFrames,bool emitGeometry) const
 {
     // PAL11C6F8..11C764: views1,2,3 select the first bank; all
     // other views select the second. Missing sky models use the existing
@@ -81,7 +81,10 @@ void SkyResources::StuffSky(const CarCinematicScreen& view,EcstasyFrame& frame,
     // tests the same DrawSky control written by Stomper's wireframe group.
     if(!nativeRenderPolicy.drawSky)return;
     const std::size_t index=view.id>=1 && view.id<=3 ? 0u:1u;
-    frame.RenderModel(const_cast<EditorMarkerModel&>(models_[index]),transforms_[index].data(),
-        view,0,1.0f,worldFrames);
+    auto& model=const_cast<EditorMarkerModel&>(models_[index]);
+    // RenderModel owns animation and texture-table updates for special models.
+    if(!emitGeometry && (!model.solid || (!model.solid->rigidAnimation &&
+        !model.solid->vertexAnimation && !model.replacement)))return;
+    frame.RenderModel(model,transforms_[index].data(),view,0,1.0f,worldFrames);
 }
 }

@@ -617,7 +617,7 @@ std::size_t sceneryNativeSelectDetailLod(const SceneryModel& model,
 }
 
 void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame,
-    std::uint32_t viewMask,std::int32_t worldFrames)
+    std::uint32_t viewMask,std::int32_t worldFrames,bool emitGeometry)
 {
     // PAL150D98/150B10/150378/14FE18/150EB8. Native vectors replace only the
     // original temporary cull-list allocation; their entries still borrow
@@ -760,6 +760,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             const bool wasNear=viewId==1 && nearState[index]!=0;
             const bool near=sceneryNativeNearDetailState(squaredXY,wasNear);
             if(viewId==1)nearState[index]=static_cast<std::uint8_t>(near);
+            if(!emitGeometry)return;
             std::size_t lod=hp2::sceneryNativeSelectDetailLod(model,pixels,
                 near?0.0f:std::numeric_limits<float>::infinity());
             const bool originalAdmission=pixels>=2 && lod<3;
@@ -871,6 +872,9 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         }
     }
     nativeRenderStatistics_.drawnInstances=draws.size();
+    // The view still publishes culling/LOD hysteresis on discarded frames.
+    // Lighting and GPU packet capture have no consumer on those frames.
+    if(!emitGeometry)return;
     if(extendedRange) {
         const auto alreadyPresent=[&](const RenderDraw& draw) {
             // Proxy sections can carry different culling boxes/LOD thresholds
@@ -962,6 +966,17 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 }
             }
         }
+#ifdef __SWITCH__
+        // Small opaque models can use the GPU clipper at the frustum edge.
+        // Bound the extra submitted geometry before using the cached path.
+        const auto* solid=draw.model->solid;
+        const bool gpuClip=draw.clip==1 && solid && solid->geometry &&
+            solid->geometry->strips.size()<=nativeGpuSceneryClipMaximumStrips;
+        if(solid && (draw.clip==2 || gpuClip)) {
+            auto& batch=opaqueBatches_[draw.model->solid];
+            if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context))continue;
+        }
+#endif
         frame.RenderModel(*draw.model,draw.matrix.data(),view,draw.clip==2 ? 4u:0u,1.0f,worldFrames,context);
     }
     if(journalSample) {

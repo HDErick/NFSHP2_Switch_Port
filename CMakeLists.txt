@@ -305,7 +305,11 @@ foreach(target IN ITEMS NFSHP2Core NFSHP2Engine)
     endif()
 endforeach()
 
-option(HP2_ENABLE_VULKAN "Build the physical Vulkan graphics backend" ${WIN32})
+set(HP2_VULKAN_DEFAULT ${WIN32})
+if(NINTENDO_SWITCH)
+    set(HP2_VULKAN_DEFAULT ON)
+endif()
+option(HP2_ENABLE_VULKAN "Build the physical Vulkan graphics backend" ${HP2_VULKAN_DEFAULT})
 if(HP2_ENABLE_VULKAN)
     include(cmake/Vulkan.cmake)
     target_compile_definitions(NFSHP2Core PUBLIC HP2_ENABLE_VULKAN=1)
@@ -337,7 +341,11 @@ if(WIN32 AND HP2_ENABLE_VULKAN)
 endif()
 
 # Standalone resource utility: no renderer, audio runtime or Python dependency.
-add_subdirectory(tools/archive)
+if(NINTENDO_SWITCH)
+    include(cmake/Switch.cmake)
+else()
+    add_subdirectory(tools/archive)
+endif()
 
 # Verification is available only in a development checkout.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/Development.cmake")

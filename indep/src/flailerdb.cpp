@@ -1,5 +1,8 @@
 #include "FlailerChunks.hpp"
 #include "FlailerDB.hpp"
+#ifdef __SWITCH__
+#include "src/nx/control_layout.hpp"
+#endif
 #include "indep/src/MoviePlayer/MV3Codec.h"
 #include "Texture.hpp"
 #include "Language.hpp"
@@ -500,10 +503,14 @@ FlailerResources::FlailerResources(std::vector<std::vector<std::uint8_t>> bundle
                         text->textCapacity=ReadU32(record+84);text->formatOptions=ReadU32(record+88);
                         text->color=ReadU32(record+92);
                         text->languageId=ReadU32(record+96);
-                        Require(text->textCapacity && Inside(100,text->textCapacity,child.size),
-                            "Flailer text buffer exceeds its chunk");
+                        const auto stored=std::min<std::size_t>(text->textCapacity,child.size-100);
+                        Require(stored,"Flailer text has no inline buffer");
                         const auto* value=reinterpret_cast<const char*>(record+100);
-                        const auto* end=static_cast<const char*>(std::memchr(value,0,text->textCapacity));
+                        const auto* end=static_cast<const char*>(std::memchr(value,0,stored));
+                        // Localized bundles may store a shorter initial value
+                        // than the editor capacity. Never read past the chunk.
+                        Require(stored==text->textCapacity || end,"Flailer text buffer exceeds its chunk");
+                        text->textCapacity=static_cast<std::uint32_t>(stored);
                         // Several shipped fixed-width values (for example
                         // four-byte "help") occupy the entire authored span.
                         // Give their exact counted bytes a host terminator;
@@ -537,6 +544,32 @@ FlailerResources::FlailerResources(std::vector<std::vector<std::uint8_t>> bundle
 }
 
 FlailerResources::~FlailerResources()=default;
+
+#ifdef __SWITCH__
+void FlailerResources::AddNativeText(std::uint32_t screenKey,std::uint32_t sourceKey,
+    std::uint32_t key,std::uint32_t parent,const char* caption,float x,float y)
+{
+    if(FindObject(screenKey,key))return;
+    auto* screen=FindScreen(screenKey);
+    auto* source=FindObject(screenKey,sourceKey,1);
+    Require(screen && source,"Native text requires its live authored screen/template");
+    auto text=std::make_unique<FlailerTextChunk>();
+    text->ownedText.resize(65,0);text->CopyAttributesFrom(static_cast<FlailerTextChunk&>(*source));
+    text->key=key;text->parentKey=parent;text->languageId=0;text->visible=1;
+    text->textCapacity=64;text->ownedText.resize(65,0);text->text=text->ownedText.data();
+    text->SetString(caption);if(x>=0)text->topLeftX=x;text->topLeftY=y;
+    auto* raw=text.get();
+    // Associate the added object with the same bundle so a track/frontend
+    // unload retires it with its screen and does not retain dangling links.
+    auto owner=std::find_if(storage_->bundles.begin(),storage_->bundles.end(),[&](const auto& bundle) {
+        return std::find(bundle.screens.begin(),bundle.screens.end(),screen)!=bundle.screens.end();
+    });
+    if(owner!=storage_->bundles.end())owner->text.reserve(owner->text.size()+1);
+    storage_->text.push_back(std::move(text));
+    if(owner!=storage_->bundles.end())owner->text.push_back(raw);
+    appendObject(*screen,*raw);++screen->textCount;
+}
+#endif
 
 std::uint64_t FlailerResources::AppendBundle(const std::vector<std::uint8_t>& authored)
 {
@@ -901,11 +934,7 @@ float unscaledFlailerTextWidth(const FlailerResources& resources,const FlailerTe
     if (!font) return 0.0f;
     const char* value=text.text;
     Require(value,"Flailer text width has no string owner");
-    if (language && language->textEnabled && text.languageId) {
-        const auto* translated=language->GetString(static_cast<std::int32_t>(text.languageId));
-        // PAL's GetLanguageString supplies an empty global string on a miss.
-        value=translated ? translated : "";
-    }
+    if(language)value=language->TextForRendering(text.languageId,value);
     float width=0.0f;
     for (const auto* cursor=reinterpret_cast<const unsigned char*>(value);*cursor;++cursor)
         if (const auto* glyph=font->characters[*cursor]) width+=glyph->advance;
@@ -1261,7 +1290,11 @@ const EditorMarkerTexture* Font::GetTextureInfo(FlailerResources& resources) con
 bool FlailerObjectChunk::DoWeNeedToBuildFlailerStrip(float alphaScale)
 {
     if (!strip) return true;
-    if (!updateKind && alphaScale==strip->alphaScale) return false;
+    bool layoutChanged=false;
+#ifdef __SWITCH__
+    layoutChanged=strip->buttonGlyphLayout>=0 && strip->buttonGlyphLayout!=nx::drivingControls;
+#endif
+    if (!updateKind && !layoutChanged && alphaScale==strip->alphaScale) return false;
     DeleteFlailerStrip();
     return true;
 }
@@ -1329,11 +1362,20 @@ void FlailerStrip::RemovePoly(FlailerPoly& polygon)
     Require(false,"Flailer polygon has no owning texture batch");
 }
 
-void FlailerTextChunk::RenderCharacter(const tTTGlyph& glyph,const Font& font,
+void FlailerTextChunk::RenderCharacter(const tTTGlyph& originalGlyph,const Font& font,
     const float position[3],const float minimum[2],const float maximum[2],float alphaScale)
 {
     Require(strip && font.texture && font.textureWidth!=0.0f && font.textureHeight!=0.0f,
         "Text glyph has no actual strip or atlas binding");
+    const auto* selected=&originalGlyph;
+#ifdef __SWITCH__
+    if(font.key==0xb85de386u) {
+        strip->buttonGlyphLayout=nx::drivingControls;
+        const auto mapped=nx::ContextGlyph(originalGlyph.character,nx::drivingControls);
+        if(const auto* replacement=font.characters[mapped])selected=replacement;
+    }
+#endif
+    const auto& glyph=*selected;
     float left=glyph.atlasPosition[0]/font.textureWidth;
     float top=glyph.atlasPosition[1]/font.textureHeight;
     float right=left+glyph.size[0]/font.textureWidth;
@@ -1729,12 +1771,10 @@ void FlailerTextChunk::Render(FlailerResources& resources,const LanguageManager*
     Require(maximum && text,"Flailer text render has no string or clip bounds");
     const char* first=text;const char* end=text+std::min<std::size_t>(textCapacity,std::strlen(text));
     flailerTextRasterState.lastRenderDistance={0.0f,0.0f};
-    if (language && language->textEnabled) {
-        if (languageId) {
-            if (const auto* translated=language->GetString(static_cast<std::int32_t>(languageId))) {
-                first=translated;end=translated+std::strlen(translated);
-            }
-        } else if (flailerTextRasterState.highlightUntranslated)color=0xffde5454u;
+    if(language) {
+        const auto* translated=language->TextForRendering(languageId,first);
+        if(translated!=first) {first=translated;end=first+std::strlen(first);}
+        if(!languageId && flailerTextRasterState.highlightUntranslated)color=0xffde5454u;
     }
     if (formatOptions&8u)RenderDarkBackground(resources,language);
     if (formatOptions&0x40u) {RenderStringFixedWidth(resources,first,end,alphaScale);return;}

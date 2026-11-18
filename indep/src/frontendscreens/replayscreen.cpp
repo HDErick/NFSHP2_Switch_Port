@@ -27,7 +27,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#else
+#elif !defined(__SWITCH__)
 #include <cerrno>
 #include <sys/vfs.h>
 #include <linux/magic.h>
@@ -60,6 +60,11 @@ FlailerBitmapChunk* Bitmap(FlailerUiState& ui,std::uint32_t key)
 // or BIN stored as an ordinary file is not a physical optical volume.
 bool ResourceVolumeIsOptical(const GameResources& resources)
 {
+#ifdef __SWITCH__
+    // Game resources on this host are backed by the SD card.
+    (void)resources;
+    return false;
+#else
     const auto path=std::filesystem::absolute(resources.SourcePath());
 #ifdef _WIN32
     std::wstring root(32768,L'\0');
@@ -73,6 +78,7 @@ bool ResourceVolumeIsOptical(const GameResources& resources)
     if(statfs(path.c_str(),&volume)!=0)
         throw std::system_error(errno,std::generic_category(),"Replay resource volume query failed");
     return volume.f_type==ISOFS_SUPER_MAGIC || volume.f_type==UDF_SUPER_MAGIC;
+#endif
 #endif
 }
 }

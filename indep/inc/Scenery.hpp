@@ -3,6 +3,9 @@
 #include "indep/inc/Ecstasy.hpp"
 #include "indep/inc/AcidFX.hpp"
 #include "indep/inc/WorldObject.hpp"
+#ifdef __cplusplus
+#include <unordered_map>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -153,7 +156,7 @@ public:
     std::vector<std::int16_t> WhatSectionsShouldWeDraw(const CarCinematicScreen& view,
         std::size_t capacity=128);
     void Render(const CarCinematicScreen& view,EcstasyFrame& frame,std::uint32_t viewMask,
-        std::int32_t worldFrames);
+        std::int32_t worldFrames,bool emitGeometry=true);
 private:
     struct SectionStorage;
 
@@ -177,6 +180,9 @@ private:
         std::size_t visited{};
     };
     std::vector<RenderDraw> drawScratch_;
+#ifdef __SWITCH__
+    std::unordered_map<const EditorMarkerSolid*,OpaqueSceneryBatch> opaqueBatches_;
+#endif
     std::vector<RenderNode> nodeScratch_;
     std::vector<RenderSectionCapture> sectionCaptureScratch_;
     std::vector<std::optional<SceneLightContext>> lightContextScratch_;

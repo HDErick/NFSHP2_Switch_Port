@@ -10,6 +10,9 @@
 #include "Flags.hpp"
 #include "FEAnim.hpp"
 #include "Language.hpp"
+#ifdef __SWITCH__
+#include "src/nx/controller_session.hpp"
+#endif
 #include "CarSounds.hpp"
 #include "bware/inc/bMath.hpp"
 #include <cstring>
@@ -88,6 +91,19 @@ TitleScreen::TitleScreen(FrontendStartupServices& services,std::uint32_t screen)
 {
     auto& menu=*services_.menus;auto& ui=*menu.ui;
     Require(ui.movie && services_.movieLog,"Title screen has no actual movie/replay owners");
+    menu.screens->StopMovie();
+#ifdef __SWITCH__
+    nx::separatePlayers=false;
+    constexpr std::uint32_t creditKey=0xf1010020u,copyrightKey=0x807d4c5cu;
+    if(auto* copyright=ui.resources->FindObject(TitleKey,copyrightKey,1)) {
+        std::int32_t left{},top{},right{},bottom{};
+        Require(ui.resources->GetBoundingBox(TitleKey,copyrightKey,left,top,right,bottom,ui.language),
+            "Port credit has no copyright text bounds");
+        ui.resources->AddNativeText(TitleKey,copyrightKey,creditKey,copyright->parentKey,
+            "Port made by: HDErick",copyright->topLeftX,static_cast<float>(bottom+6));
+        ui.resources->SetObjectVisibility(TitleKey,creditKey,0);
+    }
+#endif
     ui.resources->SetObjectVisibility(TitleKey,TitleMovie,0);
     ui.resources->SetObjectVisibility(TitleKey,0x807d4c5cu,0);
     ui.resources->SetObjectVisibility(TitleKey,TitleAlternate,0);
@@ -95,8 +111,6 @@ TitleScreen::TitleScreen(FrontendStartupServices& services,std::uint32_t screen)
         phase=1;StartTitleMusic(menu);
     } else {
         phase=2;
-        bitmap=static_cast<FlailerBitmapChunk*>(ui.resources->FindObject(TitleKey,TitleMovie,2));
-        Require(bitmap,"Title screen is missing its actual authored movie bitmap");
         ui.movie->Close();OpenCurrentMovie();
         ui.resources->SetObjectVisibility(TitleKey,0x807d4c5cu,0);
     }
@@ -122,8 +136,9 @@ void TitleScreen::OpenCurrentMovie()
     auto& menu=*services_.menus;auto& ui=*menu.ui;
     const auto& movie=GetTitleMovieDescription(movieIndex,*ui.language,*menu.demoMode->demoDisc);
     ui.movie->InitFile(movie.filename);
-    if(auto* object=ui.resources->FindObject(TitleKey,movie.alternateBitmap?TitleAlternate:TitleMovie,2))
-        static_cast<FlailerBitmapChunk*>(object)->SetNativeFullscreenMovie(movie.alternateBitmap==0);
+    bitmap=static_cast<FlailerBitmapChunk*>(ui.resources->FindObject(TitleKey,movie.alternateBitmap?TitleAlternate:TitleMovie,2));
+    Require(bitmap,"Title screen is missing its actual authored movie bitmap");
+    bitmap->SetNativeFullscreenMovie(movie.alternateBitmap==0);
     ui.resources->SetObjectVisibility(TitleKey,movie.alternateBitmap ? TitleAlternate : TitleMovie,1);
 }
 
@@ -186,6 +201,9 @@ void TitleScreen::HandleTick()
     }
     const auto noMovie=phase!=2;
     ui.resources->SetGroupVisibility(TitleKey,hashString("TITLE_IMAGE"),noMovie);
+#ifdef __SWITCH__
+    ui.resources->SetObjectVisibility(TitleKey,0xf1010020u,noMovie);
+#endif
     if (noMovie && (!inputVisibleTicks || inputVisibleTicks==std::numeric_limits<std::int32_t>::max()))
         inputVisibleTicks=ui.clock->realTimer;
     ui.resources->SetObjectVisibility(TitleKey,TitlePrompt,CanAcceptInput());

@@ -2,6 +2,9 @@
 #include "FEAnim.hpp"
 #include "Fred.hpp"
 #include "Language.hpp"
+#ifdef __SWITCH__
+#include "src/nx/controller_session.hpp"
+#endif
 #include "bware/inc/bWare.hpp"
 #include <algorithm>
 #include <array>
@@ -42,8 +45,12 @@ std::int32_t ValueChanger(std::int32_t value,std::int32_t delta,
 }
 bool BothControllers(const MainMenuScreenServices& s)
 {
+#ifdef __SWITCH__
+    (void)s;return true; // Connection/assignment is validated by the libnx applet on confirmation.
+#else
     return joystickIsPluggedIn(s.screens->input->router,0) &&
         joystickIsPluggedIn(s.screens->input->router,1);
+#endif
 }
 bool MaybeChangeNumPlayers(const MainMenuScreenServices& s,FrontendChallengeSetup& data,
     std::int32_t desired)
@@ -51,7 +58,11 @@ bool MaybeChangeNumPlayers(const MainMenuScreenServices& s,FrontendChallengeSetu
     // PAL1B5C90 checks port1; MakeJoystickArrowsRight separately tests both.
     if(desired<=0)desired=2;
     else if(desired>=3)desired=1;
+#ifndef __SWITCH__
     if(!joystickIsPluggedIn(s.screens->input->router,1))desired=1;
+#else
+    (void)s;
+#endif
     const bool changed=desired!=data.playerCount;data.playerCount=desired;return changed;
 }
 float FirstItemX(MainMenuScreenServices& s,std::uint32_t screen)
@@ -98,6 +109,9 @@ void MakeCarsAvailable(MainMenuScreenServices& s)
 std::unique_ptr<FlailerExitScreenAnimation> MakeExit(MainMenuScreenServices& s,
     std::uint32_t screen,const char* target,bool push)
 {
+#ifdef __SWITCH__
+    if(target && std::strcmp(target,"Select Car2P")==0 && !nx::RequestTwoPlayerControllers())return nullptr;
+#endif
     auto exit=std::make_unique<FlailerExitScreenAnimation>(*s.ui,*s.screens,screen,target,push);
     auto* anchor=s.ui->resources->FindObject(screen,0x32c91daeu);
     Require(anchor,"Race setup exit lacks its authored lower rail anchor");
@@ -119,6 +133,9 @@ public:
           valueHighlight_(*s.ui,screen,0x1042eac3u,-1),
           arrows_(*s.ui,screen,0xd1cda594u,0x9345e4a7u)
     {
+#ifdef __SWITCH__
+        nx::separatePlayers=false;
+#endif
         selection_.showOtherItems=1;
         selection_.AddItems(*s.ui->resources,screen,Groups,cop?3:5);
         if(!cop && !s.frontend->recordDisplaySuppressed && data_.gameType>=3 && data_.gameType<=6)
@@ -328,7 +345,8 @@ public:
         case ScreenMessage::Select:
             // The source advanced menu does not push another stack frame.
             exit_=MakeExit(s_,screen_,s_.frontend->playerCount==2?"Select Car2P":"Select Car",false);
-            arrows_.SetCurrentItem(0);break;
+            if(exit_)arrows_.SetCurrentItem(0);
+            break;
         default:break;
         }
     }

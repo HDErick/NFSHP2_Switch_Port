@@ -294,6 +294,9 @@ public:
     virtual void BeginInputStep(NativeFrameTiming::Clock::time_point) {}
     virtual int32_t ReadInput(int32_t port,JoystickControls& destination)=0;
     virtual void SetRumble(int32_t port,uint8_t small,uint8_t large)=0;
+    // Optional preparation timestamp for hosts pacing capture as part of
+    // the frame budget. Simulation remains independent of this deadline.
+    virtual void BeginSceneCapture() {}
     virtual void SubmitFrame(EcstasyFrame& frame)=0;
     // An unchanged source scene may reuse owned native preparation. Success
     // means a new complete GPU render/submission, not reuse of a final image.
@@ -303,6 +306,7 @@ public:
     // Physical renderer observations only. CPU-only hosts expose no GPU
     // duration; the application must not substitute submit wall time.
     virtual bool ReadRenderStatistics(EcstasyVulkanFrameStatistics&) const noexcept {return false;}
+    virtual bool SupportsAudio() const noexcept {return true;}
     virtual WorldAudioResult OpenAudio(bSound& sound)=0;
     virtual WorldAudioResult PumpAudio(bSound& sound)=0;
     virtual WorldAudioResult CloseAudio(bSound& sound)=0;

@@ -16,6 +16,7 @@
 #include "indep/inc/TrackPath.hpp"
 #include "bware/inc/bMath.hpp"
 
+#include <chrono>
 #include <math.h>
 #include <string.h>
 #include "indep/inc/Clans.hpp"
@@ -277,8 +278,16 @@ static void worldSimulationResetContactElapsed(WorldSimulation* simulation)
     worldResetPhysicsStep(simulation->world);
 }
 
-WorldSimulationResult worldDoTimestep(WorldSimulation* simulation, float elapsed)
+WorldSimulationResult worldDoTimestep(WorldSimulation* simulation, float elapsed, WorldStepProfile* profile)
 {
+    using ProfileClock=std::chrono::steady_clock;
+    auto phaseStart=profile?ProfileClock::now():ProfileClock::time_point{};
+    const auto finishPhase=[&](double WorldStepProfile::*phase) {
+        if(!profile)return;
+        const auto now=ProfileClock::now();
+        profile->*phase+=std::chrono::duration<double,std::milli>(now-phaseStart).count();
+        phaseStart=now;
+    };
     if (simulation) simulation->stateFailure = {-1, nullptr, -1};
     if (!worldSimulationValidBinding(simulation)) return WORLD_SIMULATION_INVALID_BINDING;
     if (!worldSimulationValidCars(simulation)) return simulation->result = WORLD_SIMULATION_INVALID_CAR_TABLE;
@@ -324,6 +333,7 @@ WorldSimulationResult worldDoTimestep(WorldSimulation* simulation, float elapsed
     for (int32_t index = 0; index < world->thirdGroupEnd - world->secondGroupEnd; ++index)
         if (worldSimulationThinkCar(simulation, world->secondGroupEnd + index, elapsed) != WORLD_SIMULATION_OK) return simulation->result;
 
+    finishPhase(&WorldStepProfile::thinkingMs);
     for (int32_t index = 0; index < world->firstGroupEnd; ++index)
         if (carFrameSetupForceFeedback(simulation->frames[index]) != CAR_FRAME_OK)
             return worldSimulationFailCar(simulation, index, WORLD_SIMULATION_FRAME_FAILURE);
@@ -338,6 +348,7 @@ WorldSimulationResult worldDoTimestep(WorldSimulation* simulation, float elapsed
     if (collisions->result != COLLISION_SYSTEM_OK)
         return simulation->result = WORLD_SIMULATION_COLLISION_FAILURE;
 
+    finishPhase(&WorldStepProfile::driveMs);
     for (int32_t index = 0; index < world->totalCars; ++index)
         if (carFramePreStep(simulation->frames[index], elapsed) != CAR_FRAME_OK)
             return worldSimulationFailCar(simulation, index, WORLD_SIMULATION_FRAME_FAILURE);
@@ -347,6 +358,7 @@ WorldSimulationResult worldDoTimestep(WorldSimulation* simulation, float elapsed
     for (int32_t index = 0; index < world->totalCars; ++index)
         if (carFramePostStep(simulation->frames[index], elapsed) != CAR_FRAME_OK)
             return worldSimulationFailCar(simulation, index, WORLD_SIMULATION_FRAME_FAILURE);
+    finishPhase(&WorldStepProfile::collisionMs);
 
     worldSimulationResetContactElapsed(simulation);
     for (int32_t index = 0; index < world->totalCars; ++index) {
@@ -371,6 +383,7 @@ WorldSimulationResult worldDoTimestep(WorldSimulation* simulation, float elapsed
             carFrameUpdateSurfaceEffects(simulation->frames[index], distance) != CAR_FRAME_OK)
             return worldSimulationFailCar(simulation, index, WORLD_SIMULATION_FRAME_FAILURE);
     }
+    finishPhase(&WorldStepProfile::effectsMs);
     /* PAL14E190..14E1BC visits every car for132A70. Its complete body is
      * JR RA/NOP, so this side-effect-free pass is explicitly retired (zero count).
      * PAL12A158/1D9B60/1B52D0 are likewise exact empty tails. The separate
@@ -395,6 +408,7 @@ WorldSimulationResult worldDoTimestep(WorldSimulation* simulation, float elapsed
         return simulation->result=WORLD_SIMULATION_NONFINITE_STATE;
     }
     simulation->failedCar = -1;
+    finishPhase(&WorldStepProfile::finishMs);
     return simulation->result;
 }
 

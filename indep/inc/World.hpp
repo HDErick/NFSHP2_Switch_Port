@@ -252,7 +252,10 @@ typedef struct WorldSimulation {
     WorldStateFailure stateFailure;
 } WorldSimulation;
 
-WorldSimulationResult worldDoTimestep(WorldSimulation* simulation, float elapsed);
+typedef struct WorldStepProfile {
+    double thinkingMs, driveMs, collisionMs, effectsMs, finishMs;
+} WorldStepProfile;
+WorldSimulationResult worldDoTimestep(WorldSimulation* simulation, float elapsed, WorldStepProfile* profile);
 CollisionSystemResult worldServicesAdvanceParticipants(struct CollisionSystem* system, float elapsed);
 
 

@@ -7,7 +7,9 @@
 #ifdef __cplusplus
 #include "indep/inc/Timer.hpp"
 #include <array>
+#include <deque>
 #include <memory>
+#include <string>
 struct WeatherQuery;
 namespace hp2 { class ResourceRegistry; class EcstasyFrame; struct TextureInfo; }
 typedef hp2::ResourceRegistry NativeResourceRegistry;
@@ -666,7 +668,9 @@ struct EditorMarkerSolidGeometry {
         std::vector<std::uint8_t> nativeTriangleOrder;
         std::size_t nativeTopologyCount{};
         std::uint64_t nativeTopologyMask{};
+        std::uint64_t nativeVertexRevision{}; // Zero retains exact byte validation.
         void PrepareNativeTopology();
+        void StampNativeVertexRevision() noexcept;
     };
     struct SharedTables {
         std::vector<TextureBinding> textures;
@@ -784,6 +788,18 @@ enum EcstasyNativeRenderEggState : std::uint32_t {
     EcstasyRenderEggClampTopLeft=4u
 };
 std::uint32_t ecstasyCaptureNativeRenderEggState() noexcept;
+enum class EcstasyCarShadow : std::uint8_t { None,Sun,Road };
+
+// Frame-owned immutable snapshots survive sorting and parallel capture.
+struct EcstasyDrawInstance {
+    std::array<float,16> localToClip{};
+    std::optional<SceneLightContext> lightContext;
+};
+struct EcstasyDrawProjection {
+    std::array<std::array<float,16>,3> matrices{};
+    EcstasyProjectionPair nearSource{},frustumSource{};
+};
+
 struct EcstasyDrawCommand {
     EcstasyDrawKind kind{EcstasyDrawKind::FlailerPolygon};
     EcstasyUiPlacement uiPlacement{EcstasyUiPlacement::OriginalCanvas};
@@ -803,7 +819,8 @@ struct EcstasyDrawCommand {
     EcstasyScreenFilter screenFilter;
     std::uint32_t feedbackGroup{};
     const EditorMarkerLightMaterial* lightMaterial{};
-    std::optional<SceneLightContext> lightContext;
+    const EcstasyDrawInstance* instance{};
+    const std::array<float,16>* clipToScreen{};
     const CarCinematicScreen* view{};
     const EcstasyRenderTarget* target{};
     // DisplayRVMs borrows the real source target; this is not a TextureInfo
@@ -813,9 +830,8 @@ struct EcstasyDrawCommand {
     // Native Vulkan implementation of the retail PAL Select Car env-map
     // source-alpha additive equation; only the frontend body map sets this.
     bool showcaseEnvironmentBlend{};
-    std::array<float,16> localToWorld{};
-    std::array<float,16> localToClip{};
-    std::array<float,16> clipToScreen{};
+    bool cachedOpaqueScenery{};
+    EcstasyCarShadow carShadow{};
     std::array<std::uint32_t,4> rasterState{};
     std::int32_t layer{};
     std::int32_t clipClass{};
@@ -832,6 +848,17 @@ struct EcstasyDrawCommand {
     // Its alpha key moves the entire packet, preserving its internal order.
     std::uint64_t alphaGroup{};
     std::array<std::uint8_t,4> vertexOrder{{0,1,2,3}};
+    const SceneLightContext* LightContext() const noexcept {
+        return instance && instance->lightContext ? &*instance->lightContext:nullptr;
+    }
+    const std::array<float,16>& LocalToClip() const noexcept {
+        static constexpr std::array<float,16> empty{};
+        return instance ? instance->localToClip:empty;
+    }
+    const std::array<float,16>& ClipToScreen() const noexcept {
+        static constexpr std::array<float,16> empty{};
+        return clipToScreen ? *clipToScreen:empty;
+    }
 };
 
 // Native arithmetic adapter of the released normal/reflection/lighter path.
@@ -884,6 +911,19 @@ struct EcstasyDepthTransfer {
     bool consumedBoundsValid{};
 };
 
+struct OpaqueSceneryBatch {
+    struct Strip {
+        const EditorMarkerSolidGeometry::Strip* geometry{};
+        const TextureInfo* texture{};
+        std::uint32_t flags{};
+    };
+    const EditorMarkerSolidGeometry* geometry{};
+    std::uint64_t textureRevision{};
+    bool eligible{};
+    std::vector<const EditorMarkerTexture*> bindings;
+    std::vector<Strip> strips;
+};
+
 class EcstasyFrame final {
 public:
     enum class Phase { Building,Ready,Submitted,Complete };
@@ -893,6 +933,8 @@ public:
     EcstasyFrame& operator=(const EcstasyFrame&)=delete;
     const std::vector<EcstasyDrawCommand>& Commands() const noexcept {return commands_;}
     Phase State() const noexcept {return phase_;}
+    std::size_t CapturedInstanceCount() const noexcept {return liveInstances_;}
+    std::size_t CapturedProjectionCount() const noexcept {return liveProjections_;}
     // Capture original eSetZWriteState in the native packet stream. The
     // returned state and bool normalization match PAL1033C8.
     std::int32_t SetZWriteState(std::int32_t enabled);
@@ -962,7 +1004,13 @@ public:
         const float localToWorld[16],const CarCinematicScreen& view);
     // Released exBegin/EndStrip110848/110878 and eBegin/EndStrip110488/110608.
     void RenderWorldStrip(const std::vector<frontend::FlailerPolyVertex>& vertices,
-        const TextureInfo& texture,const float localToWorld[16],const CarCinematicScreen& view);
+        const TextureInfo& texture,const float localToWorld[16],const CarCinematicScreen& view,
+        EcstasyCarShadow shadow=EcstasyCarShadow::None);
+    void RecordCarShadowCapture(double sunMilliseconds,double roadMilliseconds) noexcept {
+        carShadowCaptureMilliseconds_[0]+=sunMilliseconds;
+        carShadowCaptureMilliseconds_[1]+=roadMilliseconds;
+    }
+    const std::array<double,2>& CarShadowCaptureMilliseconds() const noexcept {return carShadowCaptureMilliseconds_;}
     // Native packet transport for PAL eModel::Render/RenderStrips. The
     // existing resource owner supplies decoded XYZ/ST/RGB555; no geometry
     // cache or texture fallback is manufactured by a rendering call.
@@ -970,6 +1018,10 @@ public:
         const CarCinematicScreen& view,std::uint32_t flags=0,float alphaScale=1.0f,
         std::int32_t worldFrames=0,const SceneLightContext* lightContext=nullptr,
         const std::vector<std::array<float,16>>* boneMatrices=nullptr);
+    // Static opaque scenery uses ordered bindings and GPU frustum clipping.
+    bool RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
+        const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext);
+    std::uint64_t ReusedOpaqueSceneryStrips() const noexcept {return reusedOpaqueSceneryStrips_;}
     void RenderStrip(const EditorMarkerModel& model,const EditorMarkerSolidGeometry::Strip& strip,
         const TextureInfo& texture,const EditorMarkerLightMaterial* material,
         const float localToWorld[16],const CarCinematicScreen& view,
@@ -992,6 +1044,11 @@ private:
     // Only the issuing owner reads writable frame/render policy. Preparation
     // borrows immutable geometry and projection inputs until its synchronous
     // join, and writes commands/posed strips into a separate ordered chunk.
+    std::uint64_t reusedOpaqueSceneryStrips_{};
+    std::array<double,2> carShadowCaptureMilliseconds_{};
+    const EcstasyDrawInstance& CaptureInstance(const float localToWorld[16],
+        const CarCinematicScreen& view,const SceneLightContext* lightContext=nullptr);
+    const EcstasyDrawProjection& CaptureProjection(const CarCinematicScreen& view);
     struct StripCaptureState;
     StripCaptureState CaptureStripState() const;
     static void CaptureStrip(std::vector<EcstasyDrawCommand>& output,
@@ -1000,7 +1057,7 @@ private:
         const TextureInfo& texture,const EditorMarkerLightMaterial* material,
         const float localToWorld[16],const CarCinematicScreen& view,
         std::int32_t clipClass,std::uint32_t flags,float alphaScale,
-        const SceneLightContext* lightContext,const float preparedLocalToClip[16]);
+        const SceneLightContext* lightContext);
     struct ModelStripSource {std::size_t index{};std::int32_t clipClass{};};
     struct ModelCaptureChunk {
         std::vector<EcstasyDrawCommand> commands;
@@ -1009,6 +1066,12 @@ private:
     };
     void Release() noexcept;
     std::vector<EcstasyDrawCommand> commands_;
+    // Deque growth preserves references. Value-only slots are reused after
+    // every source command and preparation worker has released its borrow.
+    std::deque<EcstasyDrawInstance> capturedInstances_;
+    std::deque<EcstasyDrawProjection> capturedProjections_;
+    std::size_t liveInstances_{},liveProjections_{};
+    const EcstasyDrawProjection* lastProjection_{};
     std::uint32_t nextFeedbackGroup_{};
     std::vector<EcstasyDrawCommand> pendingAlphaCommands_;
     // Native temporary capacity only. Neither scratch list survives a call
@@ -1115,6 +1178,9 @@ struct EcstasySceneBindings {
     // The application defers these post-capture mutations until the next
     // logical update, after every presenter has released the prior borrow.
     bool deferPresentationUpdates{};
+    bool emitRaceGeometry{true};
+    double* carCaptureMilliseconds{};
+    platform::NativeDurationStatistics* sceneryCaptureTiming{};
 };
 void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame);
 // Independent native UI overlay. It has no authored screen/debug object and
@@ -1125,12 +1191,29 @@ void EcstasyDisplayFrameRate(frontend::FlailerResources& resources,
 // CPU durations refer to the submitted frame. GPU duration refers only to
 // the explicitly identified completed submission, obtained after its fence.
 // Unsupported timestamp queues leave gpuTimeAvailable false.
+struct EcstasyVulkanRenderProfile {
+    double gatherValidationMilliseconds{},gatherFinishMilliseconds{};
+    double pipelineLookupMilliseconds{},recordSceneMilliseconds{},queueSubmitMilliseconds{};
+    std::array<std::uint64_t,2> shadowStrips{},shadowTriangles{};
+    std::array<double,2> shadowGatherMilliseconds{};
+    std::uint64_t shadowGatherSamples{};
+};
+
+struct EcstasyVulkanGpuProfile {
+    double setupMilliseconds{},mainMilliseconds{},mirrorMilliseconds{},auxMilliseconds{},tailMilliseconds{};
+    bool available{};
+};
+
 struct EcstasyVulkanFrameStatistics {
     double gatherMilliseconds{},fenceWaitMilliseconds{},recordSubmitMilliseconds{},presentMilliseconds{};
     double gpuMilliseconds{};
+    EcstasyVulkanRenderProfile renderProfile;
+    EcstasyVulkanGpuProfile gpuProfile;
     std::uint64_t submittedFrame{},completedGpuFrame{};
     std::uint64_t textureValidations{},textureUploads{},textureUploadBytes{},textureStagingAllocations{};
-    std::uint64_t pipelineCreations{},drawBatches{},particles{};
+    std::uint64_t pipelineCreations{},pendingPipelineDraws{},drawBatches{},particles{},gpuWorldVertices{};
+    std::uint64_t sceneryPipelineHits{};
+    std::uint64_t sceneryPacketHits{},sceneryPacketMisses{},sceneryPacketFallbacks{};
     // Actual CPU budget and distinct threads that recorded draw commands.
     // These are work diagnostics, not an estimate of physical GPU speed.
     std::uint32_t availableCpuThreads{},commandRecordingThreads{},commandRecordingChunks{};
@@ -1169,6 +1252,9 @@ struct EcstasyVulkanOptions {
     // Maintainer serial/parallel parity control. Normal play automatically
     // partitions substantial draw runs across the available CPU budget.
     bool parallelCommandRecording{true};
+    // Skip a draw until its exact pipeline has compiled on the worker.
+    bool asyncPipelines{};
+    std::string pipelineCachePath;
     // Opt-in transport experiment for maintainer parity/performance controls.
     // The measured candidate did not improve total CPU time, so normal play
     // keeps the direct path. Launcher and authored quality stay unchanged.
@@ -1328,7 +1414,8 @@ public:
     SkyResources& operator=(const SkyResources&)=delete;
     const EditorMarkerModel& Model(std::size_t index) const;
     const float* Transform(std::size_t index) const;
-    void StuffSky(const CarCinematicScreen& view,EcstasyFrame& frame,std::int32_t worldFrames) const;
+    void StuffSky(const CarCinematicScreen& view,EcstasyFrame& frame,std::int32_t worldFrames,
+        bool emitGeometry=true) const;
 private:
     std::array<EditorMarkerModel,2> models_{};
     std::array<std::array<float,16>,2> transforms_{};
@@ -1394,24 +1481,24 @@ void graphicsNotifyPresentationComplete() noexcept;
 #include "indep/inc/eMath.hpp"
 
 namespace hp2 {
-// PC-only presentation quality: retain the closest authored mesh at a
-// greater camera distance without touching PAL resource thresholds, world
-// culling, physics, event data or the actual transform/model dimensions.
-// These two owners use separate source thresholds and therefore separate
-// PC quality factors. They deliberately do not affect texture mipmaps.
+#ifdef __SWITCH__
+inline constexpr float nativeSceneryDetailDistanceFactor = 1.0f;
+inline constexpr float nativeVehicleDetailDistanceFactor = 1.75f;
+inline constexpr float nativeSceneryHighDetailSurfaceDistance = 35.0f;
+inline constexpr float nativeSceneryNearDetailEnterXY = 35.0f;
+inline constexpr float nativeSceneryNearDetailExitXY = 50.0f;
+#else
 inline constexpr float nativeSceneryDetailDistanceFactor = 3.0f;
 inline constexpr float nativeVehicleDetailDistanceFactor = 2.5f;
-// Native PC near-field quality guard. An authored scenery radius describes
-// the whole building, not the nearest wall or gas pump: pixel thresholds
-// computed from the model origin can switch coarse silhouettes at the player.
-// This distance is to the actual instance's world AABB, NOT its center.
 inline constexpr float nativeSceneryHighDetailSurfaceDistance = 125.0f;
-// Presentation-only PC LOD hysteresis. Screen-space thresholds still select
-// distant meshes; a near static building uses its authored best available
-// mesh without jumping back on small eye/camera motions. The XY test avoids
-// inappropriate distant vertical extents in the PS2 asset AABB metadata.
 inline constexpr float nativeSceneryNearDetailEnterXY = 125.0f;
 inline constexpr float nativeSceneryNearDetailExitXY = 165.0f;
+#endif
+// Use the nearest scenery envelope for the high-detail guard. XY distance
+// avoids distant vertical extents, and entry/exit hysteresis reduces popping.
+// Beyond the guard, authored screen-space thresholds select existing meshes.
+
+
 
 inline std::int32_t nativeDetailLodPixels(std::int32_t originalPixels,
     float distanceFactor) noexcept
@@ -1474,6 +1561,11 @@ namespace hp2 {
 // affinity restrictions. Work is bounded by this count and the useful jobs,
 // never by a fixed application-wide limit on the number of worker threads.
 unsigned NativeSceneEffectiveHardwareConcurrency() noexcept;
+#ifdef __SWITCH__
+void ConfigureNativeSceneWorker() noexcept;
+#else
+inline void ConfigureNativeSceneWorker() noexcept {}
+#endif
 
 inline bool& NativeSceneExecutingJobs() noexcept {
     static thread_local bool active=false;
@@ -1598,6 +1690,7 @@ private:
         }
     }
     void Worker(unsigned slot) noexcept {
+        ConfigureNativeSceneWorker();
         std::size_t seen=0;
         for(;;) {
             bool assigned=false;

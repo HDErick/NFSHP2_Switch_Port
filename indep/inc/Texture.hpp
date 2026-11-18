@@ -121,12 +121,14 @@ struct TexturePackRegistry {
     // every material strip during scene construction. Original pack/texture
     // objects remain the sole owners. This is not a second resource table.
     TextureInfo* LookupDescriptor(const EditorMarkerTexture* descriptor) noexcept;
-    void InvalidateDescriptorIndex() noexcept { descriptorIndexValid_=false; }
+    void InvalidateDescriptorIndex() noexcept { descriptorIndexValid_=false;++bindingRevision_; }
+    std::uint64_t BindingRevision() const noexcept {return bindingRevision_;}
     // Source global330E38; zero selects each animation's authored rate.
     std::int32_t animationRateOverride{};
 private:
     std::unordered_map<const EditorMarkerTexture*,TextureInfo*> descriptorIndex_;
     bool descriptorIndexValid_{};
+    std::uint64_t bindingRevision_{1};
 };
 extern TexturePackRegistry texturePackRegistry;
 bool SwapTextureName(TexturePackRegistry& registry,std::uint32_t first,std::uint32_t second);

@@ -1,4 +1,7 @@
 #include "FEAnim.hpp"
+#ifdef __SWITCH__
+#include "src/nx/display_options.hpp"
+#endif
 #include "FMenus.hpp"
 #include "bware/inc/bMath.hpp"
 #include "bware/inc/bMath.hpp"
@@ -678,6 +681,11 @@ void FlailerScrollingMenuList::HandleEvent(ScreenMessage message,ScreenCallbackD
     auto& s=*storage_;
     if(message==ScreenMessage::Highlight) {
         if(s.mask==-1) {
+#ifdef __SWITCH__
+            const int position=nx::DisplayMenuPosition(s.screen,data.key);
+            if(position>=0)s.mask=std::min(position,6);
+            else
+#endif
             if(data.key>=0x52e039f3u && data.key<=0x52e039fbu)
                 s.mask=std::min(static_cast<std::int32_t>(data.key-0x52e039f3u),6);
             else if(data.key==0xaee77883u || data.key==0xaee77884u)s.mask=6;

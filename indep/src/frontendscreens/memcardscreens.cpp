@@ -1,6 +1,9 @@
 #include "FMenus.hpp"
 #include "Fred.hpp"
 #include "Language.hpp"
+#ifdef __SWITCH__
+#include "src/nx/config.hpp"
+#endif
 #include "Flags.hpp"
 #include "inc/dbFiles.hpp"
 #include "bware/inc/bWare.hpp"
@@ -133,6 +136,9 @@ MemcardScreens::LoadResult MemcardScreens::LoadProfile()
     } else if(read!=cMC::Ok)return failed(state.files.LastErrorMessage());
     if(!state.frontend.DeserializeNativeProfileText(bytes.data(),bytes.size(),state.error))return failed(state.error);
     state.blockedByLoadFailure=false;
+#ifdef __SWITCH__
+    state.frontend.currentLanguage=nx::PreferredLanguage(state.frontend.currentLanguage);
+#endif
 
     if(state.menus && state.menus->ui && state.menus->ui->language &&
        state.menus->ui->language->currentLanguage!=state.frontend.currentLanguage)

@@ -1,4 +1,7 @@
 #include "FMenus.hpp"
+#ifdef __SWITCH__
+#include "src/nx/controller_session.hpp"
+#endif
 #include "FEAnim.hpp"
 #include "Fred.hpp"
 #include "Language.hpp"
@@ -143,6 +146,9 @@ public:
           highlight_(*services.ui,screen,0xab671c9au,services.ui->animationSettings.highlightColor),
           slide_(*services.ui,screen,MainMenuLeft(*services.ui,screen))
     {
+#ifdef __SWITCH__
+        nx::separatePlayers=false;
+#endif
         // PAL216460: preserve the original resource/profile/audio/movie
         // order. No menu success is synthesized when a dependency is absent.
         const auto& setup=*services_.raceSetup;

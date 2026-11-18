@@ -1,4 +1,8 @@
 #include "PauseMenu.hpp"
+#ifdef __SWITCH__
+#include "src/nx/config.hpp"
+#include "src/nx/display_options.hpp"
+#endif
 #include "RaceCoordinator.hpp"
 #include "Replay.hpp"
 #include "Language.hpp"
@@ -97,7 +101,12 @@ PauseDisplayOpts::PauseDisplayOpts(RaceScreenServices& services,std::uint32_t sc
     DisplaySplitTime();DisplayLapInfo();DisplayGauges();DisplayTrackmap();DisplayLeaderboard();
     DisplayScoring();DisplayHUD();DisplayHudHotKey();DoGrayout();AdjustLapInfo();
 }
-PauseDisplayOpts::~PauseDisplayOpts() {player_=nullptr;}
+PauseDisplayOpts::~PauseDisplayOpts() {
+#ifdef __SWITCH__
+    nx::SaveUserSettings();
+#endif
+    player_=nullptr;
+}
 bool PauseDisplayOpts::ShouldSeeRearViewMirror() const
 {
     return services_.players->count==1 && Player().settings.inputProfile==0;
@@ -515,6 +524,9 @@ void PauseDisplayOpts::MenuCallback(ScreenMessage message,ScreenCallbackData& da
     else if (message==ScreenMessage::Left || message==ScreenMessage::Right) {
         const auto direction=message==ScreenMessage::Left?-1:1;
         bool changed=false;
+#ifdef __SWITCH__
+        changed=nx::HandleDisplaySetting(*PauseUi(services_).resources,screen_,data.key,direction);
+#endif
         switch (data.key) {
         case 0x52E039F3u:changed=CycleHUD(direction);break;
         case 0x52E039F4u:changed=ToggleRearView();break;
@@ -549,6 +561,10 @@ void PauseDisplayOpts::MenuCallback(ScreenMessage message,ScreenCallbackData& da
         case 0xAEE77885u:value=0x4AFF0DF3u;break;
         default:break;
         }
+#ifdef __SWITCH__
+        if(data.key==nx::FrameLimitItem(screen_))value=nx::frameLimitValue;
+        if(data.key==nx::ShowFpsItem(screen_))value=nx::showFpsValue;
+#endif
         arrows_.SetCurrentItem(value);valueHighlight_.SetCurrentMenuItem(value);
     }
 }

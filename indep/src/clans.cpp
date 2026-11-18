@@ -117,9 +117,10 @@ void ClanResources::Bounds(const WheelTrailClan& clan,float minimum[3],float max
     std::copy_n(clan.minimum,3,minimum);std::copy_n(clan.maximum,3,maximum);
 }
 void ClanResources::PrepareRender(const float matrix[16],const CarCinematicScreen& screen,
-    std::vector<SkidRenderQuad>& output,bool advanceState)
+    std::vector<SkidRenderQuad>& output,bool advanceState,bool emitGeometry)
 {
     Require(matrix && screen.view,"RenderClans requires the live view and clip matrix");
+    if(!advanceState && !emitGeometry)return;
     for(auto* clan=owner_->first;clan;) {
         // Save the next original node: visible groups may move to list head.
         auto* next=clan->next;
@@ -132,7 +133,7 @@ void ClanResources::PrepareRender(const float matrix[16],const CarCinematicScree
                 clan->lastTouched=owner_->clock->worldLoopCounter;
                 removeClan(*owner_,*clan);prependClan(*owner_,*clan);
             }
-            wheelTrailPrepareRender(*owner_->skids,clan->first,matrix,screen,output,advanceState);
+            wheelTrailPrepareRender(*owner_->skids,clan->first,matrix,screen,output,advanceState,emitGeometry);
         }
         clan=next;
     }

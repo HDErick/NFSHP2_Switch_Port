@@ -4,6 +4,7 @@
 #include "FEAnim.hpp"
 #include "indep/inc/CarDriver.hpp"
 #include "Texture.hpp"
+#include <exception>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -15,6 +16,9 @@ namespace hp2::frontend { struct FlailerScreenList; }
 struct FlailerFrontendInput {
     GameInputRouter* router{};
     hp2::frontend::FlailerScreenList* screens{};
+    // Retain the C++ failure across the typed C input result. The runtime
+    // rethrows it on the same thread so the session log has the real cause.
+    std::exception_ptr dispatchFailure;
 };
 #endif
 

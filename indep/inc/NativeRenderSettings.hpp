@@ -7,13 +7,18 @@
 
 namespace hp2 {
 struct NativeRenderSettings {
-    float drawDistanceScale{1.0f};       // World views: 1..4 times authored visibility.
+    float drawDistanceScale{1.0f};       // World views relative to authored visibility.
     float mirrorDistanceScale{1.0f};     // Rear view only: 0.5..4 times authored visibility.
 };
 inline NativeRenderSettings validateNativeRenderSettings(NativeRenderSettings value) noexcept
 {
+#ifdef __SWITCH__
+    constexpr float minimumDrawDistance=0.4f;
+#else
+    constexpr float minimumDrawDistance=1.0f;
+#endif
     value.drawDistanceScale=std::isfinite(value.drawDistanceScale) ?
-        std::clamp(value.drawDistanceScale,1.0f,4.0f):1.0f;
+        std::clamp(value.drawDistanceScale,minimumDrawDistance,4.0f):1.0f;
     value.mirrorDistanceScale=std::isfinite(value.mirrorDistanceScale) ?
         std::clamp(value.mirrorDistanceScale,0.5f,4.0f):1.0f;
     return value;
@@ -35,6 +40,8 @@ inline float nativeViewDistanceScale(std::int32_t viewId) noexcept
     return viewId==3 ? nativeRenderSettings().mirrorDistanceScale :
         viewId==1 || viewId==2 ? nativeRenderSettings().drawDistanceScale:1.0f;
 }
+
+inline constexpr std::uint32_t nativeGpuSceneryClipMaximumStrips=32;
 
 } // namespace hp2
 #endif

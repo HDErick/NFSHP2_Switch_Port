@@ -34,8 +34,8 @@ struct LanguageBindings {
 class LanguageManager final {
 public:
     std::int32_t currentLanguage{-1};
-    // The live manager's text-enable cell (PAL manager+14), independent of
-    // whether a retained language image happens to be loaded.
+    // Source manager+14 also tracks localized speech lifetime. Native text
+    // rendering resolves its retained language table independently.
     std::int32_t textEnabled{};
     LanguageManager();
     explicit LanguageManager(std::vector<std::uint8_t> authored);
@@ -51,6 +51,12 @@ public:
     void UnloadLocalizedSpeech();
     const char* GetString(std::int32_t key,bool byName=false) const;
     const char* GetString(const char* name) const;
+    // Text availability belongs to the loaded table, independently of the
+    // localized speech lifetime represented by textEnabled in the source.
+    const char* TextForRendering(std::uint32_t id,const char* authored) const {
+        const auto* translated=id ? GetString(static_cast<std::int32_t>(id)):nullptr;
+        return translated ? translated:authored;
+    }
     // Raw fixture callers can omit the borrowed reference resource set. The
     // live file loader passes its own GameResources for verified index repair.
     bool Loader(std::vector<std::uint8_t> authored,const GameResources* normalizationFiles=nullptr);

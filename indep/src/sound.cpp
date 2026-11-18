@@ -148,8 +148,9 @@ WorldAudioResult soundJukeboxStart(const CarSoundBindings& bindings,
 
 WorldAudioResult soundJukeboxStop(const CarSoundBindings& bindings)
 {
-    // PAL1AEC90: the music enable cell alone gates the original Stop.
-    if (!applicationLaunchOptions.musicEnabled) return WORLD_AUDIO_OK;
+    // A host with audio disabled never binds the jukebox.
+    if (!applicationLaunchOptions.musicEnabled ||
+        (bindings.globals && !bindings.globals->policy.audioSystemEnabled)) return WORLD_AUDIO_OK;
     if (!bindings.audio || soundJukeboxPlayer.audio!=bindings.audio)
         return WORLD_AUDIO_INVALID_BINDING;
     return soundJukeboxPlayer.Stop();

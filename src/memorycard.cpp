@@ -18,11 +18,19 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#ifdef __SWITCH__
+#include <mutex>
+#endif
 #endif
 
 namespace {
 constexpr std::size_t MaximumSaveBytes=4u*1024u*1024u;
 std::atomic<std::uint64_t> nextTemporaryFile{0};
+#ifdef __SWITCH__
+// SD filesystems have no hard links. Serialize this process's profile
+// publications so exclusive writes can still check and rename as one operation.
+std::mutex switchSaveWriteMutex;
+#endif
 std::filesystem::path DefaultDirectory()
 {
     // Explicit directory overrides still belong to this one file owner.
@@ -35,6 +43,11 @@ cMC::cMC(const char* directory)
     :root_(directory && *directory ? std::filesystem::u8path(directory) : DefaultDirectory())
 {
     std::error_code ec;
+#ifdef __SWITCH__
+    if(root_.native().compare(0,6,"sdmc:/")==0)
+        root_=root_.lexically_normal();
+    else
+#endif
     root_=std::filesystem::absolute(root_,ec).lexically_normal();
     if(ec)throw std::system_error(ec,"Resolve native save directory");
 }
@@ -135,7 +148,11 @@ cMC::Result cMC::MCReadFile(const char* name,std::vector<std::uint8_t>& destinat
         if(!CloseHandle(file) && !failure)failure=static_cast<int>(GetLastError());
         close.file=INVALID_HANDLE_VALUE;
 #else
+#ifdef __SWITCH__
+        const int file=open(path.c_str(),O_RDONLY);
+#else
         const int file=open(path.c_str(),O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
+#endif
         if(file<0)return Fail("Open native save",errno);
         struct Close {int file;~Close(){if(file>=0)::close(file);}} close{file};struct stat info{};
         if(fstat(file,&info))return Fail("Inspect open native save",errno);
@@ -177,6 +194,9 @@ cMC::Result cMC::MCWrite(const char* name,const void* source,std::size_t bytes,b
     if(!source || !bytes || bytes>MaximumSaveBytes){error_="Invalid native save buffer size";return InvalidSize;}
     std::filesystem::path temporary;
     try {
+#ifdef __SWITCH__
+        std::lock_guard<std::mutex> lock(switchSaveWriteMutex);
+#endif
         const auto target=FilePath(name);std::uint64_t available=0;
         const auto info=MCGetInfo(available);if(info!=Ok)return info;
         if(available<bytes){error_="Insufficient native filesystem space";return NoSpace;}
@@ -204,7 +224,11 @@ cMC::Result cMC::MCWrite(const char* name,const void* source,std::size_t bytes,b
         if(!CloseHandle(file) && !failure)failure=static_cast<int>(GetLastError());
         if(!failure && !MoveFileExW(temporary.c_str(),target.c_str(),(replaceExisting?MOVEFILE_REPLACE_EXISTING:0)|MOVEFILE_WRITE_THROUGH))failure=static_cast<int>(GetLastError());
 #else
+#ifdef __SWITCH__
+        const int file=open(temporary.c_str(),O_CREAT|O_EXCL|O_WRONLY,0600);
+#else
         const int file=open(temporary.c_str(),O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW,0600);
+#endif
         if(file<0)return Fail("Create atomic save transfer",errno);
         std::size_t position=0;int failure=0;
         while(position<bytes) {
@@ -215,6 +239,23 @@ cMC::Result cMC::MCWrite(const char* name,const void* source,std::size_t bytes,b
         }
         if(!failure && fsync(file))failure=errno;
         if(close(file) && !failure)failure=errno;
+#ifdef __SWITCH__
+        if(!failure && exists) {
+            // Horizon can reject a rename over an existing file. Retain the
+            // old profile until the new one has been published successfully.
+            auto backup=temporary;
+            backup+=".previous";
+            if(rename(target.c_str(),backup.c_str()))failure=errno;
+            else if(rename(temporary.c_str(),target.c_str())) {
+                failure=errno;
+                if(rename(backup.c_str(),target.c_str()))
+                    throw std::runtime_error("Could not restore previous profile from "+backup.u8string());
+            } else {
+                std::error_code ignored;
+                std::filesystem::remove(backup,ignored);
+            }
+        } else if(!failure && rename(temporary.c_str(),target.c_str()))failure=errno;
+#else
         if(!failure) {
             if(replaceExisting) {if(rename(temporary.c_str(),target.c_str()))failure=errno;}
             else {
@@ -229,6 +270,7 @@ cMC::Result cMC::MCWrite(const char* name,const void* source,std::size_t bytes,b
             if(directory<0)failure=errno;
             else {if(fsync(directory))failure=errno;if(close(directory) && !failure)failure=errno;}
         }
+#endif
 #endif
         if(failure){std::error_code ignored;std::filesystem::remove(temporary,ignored);return Fail("Commit atomic native save",failure);}
         error_.clear();return Ok;

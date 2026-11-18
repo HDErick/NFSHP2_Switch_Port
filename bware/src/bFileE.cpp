@@ -14,6 +14,15 @@
 
 namespace hp2 {
 namespace {
+std::string UpperAscii(const std::string& input) {
+    std::string output = input;
+    for (auto& ch : output) {
+        const auto value = static_cast<unsigned char>(ch);
+        if (value >= 'a' && value <= 'z') ch = static_cast<char>(value - 'a' + 'A');
+    }
+    return output;
+}
+
 constexpr std::uint64_t kSectorSize = 2048;
 constexpr std::uint64_t kPrimaryVolumeSector = 16;
 
@@ -139,8 +148,14 @@ GameFileSystem::GameFileSystem(const std::filesystem::path& index,
             "Archive index is not a regular file: " + index.u8string());
     Require(std::filesystem::is_regular_file(data),
             "Archive data is not a regular file: " + data.u8string());
-    Require(!std::filesystem::equivalent(index, data),
-            "Archive index and data refer to the same file: " + data.u8string());
+#ifdef __SWITCH__
+    // libnx stat does not expose distinct inode numbers on the SD card.
+    const bool sameFile=UpperAscii(index.lexically_normal().u8string())==
+                        UpperAscii(data.lexically_normal().u8string());
+#else
+    const bool sameFile=std::filesystem::equivalent(index,data);
+#endif
+    Require(!sameFile,"Archive index and data refer to the same file: " + data.u8string());
     isImage_ = false;
     volumeName_ = data.u8string() + " (index " + index.u8string() + ")";
     const auto indexFile = std::make_shared<RandomAccessFile>(index);
@@ -384,14 +399,6 @@ namespace hp2 {
 namespace {
 namespace fs = std::filesystem;
 
-std::string UpperAscii(const std::string& input) {
-    std::string output = input;
-    for (auto& ch : output) {
-        const auto value = static_cast<unsigned char>(ch);
-        if (value >= 'a' && value <= 'z') ch = static_cast<char>(value - 'a' + 'A');
-    }
-    return output;
-}
 
 fs::path LoosePath(const fs::path& root, const std::string& logicalName) {
     const auto normalized = NormalizePath(logicalName);
@@ -428,6 +435,13 @@ std::vector<std::uint8_t> LoadDecoded(const FileRange& file) {
 
 GameResources::GameResources(const fs::path& input, GameResourceSource source) {
     Require(!input.empty(), "No game resource source was selected");
+#ifdef __SWITCH__
+    // libnx mounts the SD card with a device prefix; newlib's C++ path parser
+    // otherwise treats it as relative and prepends the working directory.
+    if(input.native().compare(0,6,"sdmc:/")==0)
+        sourcePath_=input.lexically_normal();
+    else
+#endif
     sourcePath_ = fs::absolute(input).lexically_normal();
     Require(fs::exists(sourcePath_), "Game resource source does not exist: " + sourcePath_.u8string());
     if (source == GameResourceSource::LooseDirectory) {

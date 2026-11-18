@@ -1,5 +1,10 @@
 #include <exception>
 #include "Flags.hpp"
+#ifdef __SWITCH__
+#include "src/nx/control_layout.hpp"
+#include "src/nx/controller_session.hpp"
+#include "src/nx/config.hpp"
+#endif
 #include "bware/inc/bWare.hpp"
 #include "DemoDisc.hpp"
 #include "bware/inc/bMath.hpp"
@@ -225,7 +230,24 @@ struct ApplicationRuntime::Storage {
     std::chrono::steady_clock::time_point renderTimingWindowStart{std::chrono::steady_clock::now()};
     std::uint64_t renderTimedFrames{},gpuTimedFrames{},lastCompletedGpuFrame{};
     double renderUpdateMs{},renderCaptureMs{},renderSealMs{},renderGatherMs{},renderFenceMs{},renderSubmitMs{},renderPresentMs{},renderGpuMs{};
-    std::uint64_t renderLogicalUpdates{},renderSceneCaptures{},renderPreparedFrames{};
+    std::uint64_t renderLogicalUpdates{},renderSceneCaptures{},renderPreparedFrames{},renderCachedSceneryStrips{},renderSceneryPipelineHits{};
+    std::uint64_t renderCompiledPipelines{},renderPendingPipelineDraws{},renderGpuWorldVertices{};
+    double renderCarCaptureMs{};
+    std::array<double,2> renderShadowCaptureMs{};
+    EcstasyVulkanRenderProfile renderProfile{};
+    EcstasyVulkanGpuProfile renderGpuProfile{};
+    std::uint64_t renderGpuProfileSamples{};
+    WorldStepProfile worldProfile{};
+    platform::NativeDurationStatistics worldTiming,audioTiming,inputTiming,resourceTiming,sceneryTiming;
+    NativeFrameTiming::Clock::time_point lastAcceptedPresent{};
+    std::uint64_t presentsOver33ms{},presentsOver50ms{};
+    double longestPresentIntervalMs{};
+    void ServiceFrameResources()
+    {
+        platform::ScopedNativeDuration measure(resourceTiming);
+        texturePackRegistry.ServiceReads();resources->Loader().ServiceResourceLoading();
+        replayAvailableBytes=host.AvailableMemory();
+    }
     GameResources& files;NativeApplicationHost& host;
     std::filesystem::path profileDirectory,legacyProfileDirectory;
     GameTime clock{};ReplayIntegerLog joylog{};ApplicationChecksumState checksum{};
@@ -473,7 +495,7 @@ struct ApplicationRuntime::Storage {
         for(size_t i=0;i<popups.size();++i) {
             popups[i]=std::make_unique<FlailerPopup>(ui);screens.popups[i]=popups[i].get();
         }
-        frontendInput={&input,&screens};screens.input=&frontendInput;screens.soundBindings=&soundBindings;
+        frontendInput={&input,&screens,{}};screens.input=&frontendInput;screens.soundBindings=&soundBindings;
         demoMode.screens=&screens;demoMode.frontend=&profilesOwner;demoMode.raceSetup=&setup;
         demoMode.demoDisc=&demo;demoMode.files=&files;
         menus={&ui,&screens,&profilesOwner,&setup,&soundBindings,&demoMode};
@@ -578,11 +600,32 @@ struct ApplicationRuntime::Storage {
                 ", state="+std::to_string(result.state));
         setup.events=profilesOwner.boundEventResources;trackSelection.events=profilesOwner.boundEventResources;
     }
+#ifdef __SWITCH__
+    void UpdateSwitchControls()
+    {
+        const auto* session=Session();
+        nx::UpdateControllerSession(profilesOwner.playerCount,profilesOwner.IsChallengeGame());
+        nx::gameplayPresentation=flow.inGameFlag!=0;
+        nx::adaptiveGameplay=session && session->state==RC_STATE_RACE_IN_PROGRESS &&
+            (!screens.active || !screens.active->screen || screens.active->screen->screenId==-1);
+        nx::drivingControls=session && (session->state==RC_STATE_PRE_RACE ||
+            session->state==RC_STATE_RACE_IN_PROGRESS) &&
+            (!screens.active || !screens.active->screen || screens.active->screen->screenId==-1);
+    }
+#endif
     void GenerateInput(ReplayManager* replay)
     {
+        platform::ScopedNativeDuration measure(inputTiming);
+#ifdef __SWITCH__
+        UpdateSwitchControls();
+#endif
         host.BeginInputStep(simulationClock.Deadline());
-        Require(joystickGenerateEvents(input,samples,joylog,replay,clock,demo)==GAME_INPUT_OK,
-            "Source joystick scanner/typed callback dispatch failed");
+        const auto result=joystickGenerateEvents(input,samples,joylog,replay,clock,demo);
+        if(result!=GAME_INPUT_OK && frontendInput.dispatchFailure) {
+            const auto failure=frontendInput.dispatchFailure;frontendInput.dispatchFailure={};
+            std::rethrow_exception(failure);
+        }
+        Require(result==GAME_INPUT_OK,"Source joystick scanner/typed callback dispatch failed");
     }
 };
 
@@ -622,6 +665,7 @@ void ApplicationRuntime::Initialize(const std::filesystem::path& configFile)
     s.demoReplay.BindSessionHost(&s.host);
     applicationSeedRandomNumber(s.joylog);
     applicationLoadConfig(configFile.empty()?s.profileDirectory/"config.ini":configFile,s.joylog);
+    if(!s.host.SupportsAudio())carSoundGlobals.policy.audioSystemEnabled=0;
     eMathInit();
     InitStomper();
     InitDisplaySystem(s.files,s.clock);
@@ -689,7 +733,7 @@ void ApplicationRuntime::Initialize(const std::filesystem::path& configFile)
     s.AudioResult(speech->noise->Bind(&s.audioQueue,&worldAudioRuntime),"Speech noise binding");s.speechNoiseBound=true;
     if(carSoundGlobals.policy.audioSystemEnabled) {
         s.AudioResult(s.sound.Initialize(),"Sound driver initialization");
-        s.AudioResult(s.host.OpenAudio(s.sound),"Physical Windows audio device");s.audioOpened=true;
+        s.AudioResult(s.host.OpenAudio(s.sound),"Physical audio device");s.audioOpened=true;
         s.AudioResult(s.sound.SetPath("sound\\"),"Source audio bank path");
         s.AudioResult(soundLoadRegion(s.soundBindings,"common"),"Source common sound bank");
         while(!soundDriverState.commonRegionLoaded) {
@@ -715,7 +759,11 @@ void ApplicationRuntime::Initialize(const std::filesystem::path& configFile)
             std::this_thread::yield();
         }});
     // Final LoadLanguageInfo100808 tail100818 calls SetLanguage(0).
+#ifdef __SWITCH__
+    s.language.SetLanguage(nx::PreferredLanguage(0));
+#else
     s.language.SetLanguage(0);
+#endif
     // PAL LoadGlobalChunks1683DC..16847C loads the initial dynamic image
     // after language selection, then services its real queued pixel reads.
     // English language0 itself does not request this texture.
@@ -780,6 +828,7 @@ bool ApplicationRuntime::Tick()
     if(s.presentationTimingEpoch!=s.host.PresentationTimingEpoch()) {
         s.presentationTimingEpoch=s.host.PresentationTimingEpoch();
         const auto resumed=s.host.FrameTime();
+        s.lastAcceptedPresent={};
         s.InvalidatePreparedScene();
         s.frameTiming.Reset(resumed);s.simulationClock.Reset(resumed);applicationFrameTiming={};
     }
@@ -799,6 +848,7 @@ bool ApplicationRuntime::Tick()
     const auto sourceBefore=s.sourceUpdateTiming.totalNanoseconds;
     platform::ScopedNativeDuration sourceMeasure(s.sourceUpdateTiming);
     bool advancedPresentation=false;
+    bool sceneGeometryEmitted=true;
     std::uint32_t updates=0,captures=0;
     double captureMilliseconds=0.0,sealMilliseconds=0.0;
     if(!reusedPreparation)for(;;) {
@@ -821,6 +871,15 @@ bool ApplicationRuntime::Tick()
             const auto& display=s.profilesOwner.nativeDisplay;
             s.host.ApplyDisplaySettings(display.width,display.height,display.fullscreen,display.vsync);
             s.RefreshNativeDisplayGeometry();
+#ifdef __SWITCH__
+            const int preferredLanguage=nx::PreferredLanguage(s.profilesOwner.currentLanguage);
+            if(s.profilesOwner.currentLanguage!=preferredLanguage) {
+                char detail[96]{};std::snprintf(detail,sizeof(detail),"profile=%d preferred=%d",
+                    s.profilesOwner.currentLanguage,preferredLanguage);
+                s.host.RecordSessionEvent("language.profile_override",detail);
+                s.profilesOwner.currentLanguage=preferredLanguage;
+            }
+#endif
             if(s.language.currentLanguage!=s.profilesOwner.currentLanguage)s.language.SetLanguage(s.profilesOwner.currentLanguage);
             const auto* previousSimulation=s.Simulation();
             const bool previouslyInGame=s.flow.inGameFlag!=0;
@@ -903,7 +962,9 @@ bool ApplicationRuntime::Tick()
                             s.scheduledStepQuanta=static_cast<std::uint32_t>(gameTimeQuantizeElapsed(recordedElapsed));
                         }
                         gameTimeSetWorldElapsed(&s.clock,worldElapsed);s.GenerateInput(replay);
-                        const auto stepResult=worldDoTimestep(simulation,worldElapsed);
+                        platform::ScopedNativeDuration measure(s.worldTiming);
+                        const auto stepResult=worldDoTimestep(simulation,worldElapsed,&s.worldProfile);
+                        measure.Finish();
                         if(stepResult!=WORLD_SIMULATION_OK) {
                             // Report actual owner results without replacing a failure
                             // with a successful step or attributing a global collision
@@ -1013,8 +1074,11 @@ bool ApplicationRuntime::Tick()
             // views. C++ dispatch targets the actual owner, never a replacement pose.
             for(auto& screen:s.cameras.screens)if(screen.last)
                 Require(carCinematicAdvanceOwned(screen.last)==CAR_CINEMATIC_OK,"Active camera mover update failed");
-            s.AudioResult(soundUpdate(s.soundBindings,s.trackPhase->Simulation(),s.speechStream,s.profilesOwner,s.parameters,s.flow,&s.joylog),"Original sound frame");
-            if(s.audioOpened)s.AudioResult(s.host.PumpAudio(s.sound),"Physical audio frame");
+            {
+                platform::ScopedNativeDuration measure(s.audioTiming);
+                s.AudioResult(soundUpdate(s.soundBindings,s.trackPhase->Simulation(),s.speechStream,s.profilesOwner,s.parameters,s.flow,&s.joylog),"Original sound frame");
+                if(s.audioOpened)s.AudioResult(s.host.PumpAudio(s.sound),"Physical audio frame");
+            }
             joystickUpdatePortRumblers(s.input,s.clock);
             for(int32_t port=0;port<2;++port)if(s.input.pendingMotorDirty[port]) {
                 s.host.SetRumble(port,s.input.pendingMotorBytes[port][0],s.input.pendingMotorBytes[port][1]);s.input.pendingMotorDirty[port]=0;
@@ -1032,12 +1096,31 @@ bool ApplicationRuntime::Tick()
         if(s.frame->State()==EcstasyFrame::Phase::Complete)s.frame->BeginNextFrame();
         else Require(s.frame->State()==EcstasyFrame::Phase::Building && s.frame->Commands().empty(),"Previous CPU frame capture is still live");
         s.flowBindings.renderFrame=s.frame.get();
+#ifdef __SWITCH__
+        s.UpdateSwitchControls();
+#endif
         EcstasySceneBindings scene{s.cameras,s.ui,s.trackPhase.get(),&s.flow,&s.parameters,&s.flow.currentState,&s.clock,&s.frontendFrame,&s.screens};
         scene.environmentMap=s.environmentMap.get();scene.effects=&s.resources->FX();
+        scene.carCaptureMilliseconds=&s.renderCarCaptureMs;
+        scene.sceneryCaptureTiming=&s.sceneryTiming;
         scene.advancePresentation=advancedPresentation;scene.deferPresentationUpdates=true;
+        if(advancedPresentation) {
+            s.simulationClock.CompleteStep(s.scheduledStepQuanta);
+            ++updates;
+        }
+#ifdef __SWITCH__
+        if(s.flow.inGameFlag && ((advancedPresentation && s.simulationClock.UpdateDue(observed)) ||
+            !s.host.PresentationDue(s.host.FrameTime())))scene.emitRaceGeometry=false;
+        sceneGeometryEmitted=scene.emitRaceGeometry;
+#endif
         s.RememberPreparedScene();
+        if(scene.emitRaceGeometry)s.host.BeginSceneCapture();
         const auto captureStarted=std::chrono::steady_clock::now();
         EcstasyDisplayFrame(scene,*s.frame);
+        const auto& shadowCapture=s.frame->CarShadowCaptureMilliseconds();
+        for(std::size_t shadow=0;shadow<shadowCapture.size();++shadow)
+            s.renderShadowCaptureMs[shadow]+=shadowCapture[shadow];
+        s.renderCachedSceneryStrips+=s.frame->ReusedOpaqueSceneryStrips();
         const auto sealStarted=std::chrono::steady_clock::now();
         s.frame->Seal();
         const auto sealCompleted=std::chrono::steady_clock::now();
@@ -1046,15 +1129,12 @@ bool ApplicationRuntime::Tick()
         ++captures;
         if(advancedPresentation) {
             s.pendingClockAdvance=true;
-            s.simulationClock.CompleteStep(s.scheduledStepQuanta);
-            ++updates;
             // Catch up complete logical updates before one presentation. Bound
             // work per host call, but retain all outstanding time for later calls.
             if(updates<8u && s.simulationClock.UpdateDue(observed)) {
                 s.InvalidatePreparedScene();
                 s.frame->CancelBeforeSubmit();
-                texturePackRegistry.ServiceReads();s.resources->Loader().ServiceResourceLoading();
-                s.replayAvailableBytes=s.host.AvailableMemory();
+                s.ServiceFrameResources();
                 continue;
             }
         }
@@ -1063,7 +1143,7 @@ bool ApplicationRuntime::Tick()
     sourceMeasure.Finish();
     const auto capturedUpdateMs=static_cast<double>(s.sourceUpdateTiming.totalNanoseconds-sourceBefore)*1.0e-6;
     const bool simulationBehind=s.simulationClock.UpdateDue(observed);
-    if(!reusedPreparation && (simulationBehind || !s.host.PresentationDue(s.host.FrameTime()))) {
+    if(!reusedPreparation && (simulationBehind || !sceneGeometryEmitted || !s.host.PresentationDue(s.host.FrameTime()))) {
         // A logical frame still executes the source capture/post-draw contract,
         // but a capped display or a bounded catch-up call does not submit it
         // to the GPU. Drain existing debt before another blocking presentation:
@@ -1075,8 +1155,7 @@ bool ApplicationRuntime::Tick()
         s.deferredCaptureMilliseconds+=captureMilliseconds;s.deferredSealMilliseconds+=sealMilliseconds;
         s.deferredLogicalUpdates+=updates;s.deferredSceneCaptures+=captures;
         if(advancedPresentation) {
-            texturePackRegistry.ServiceReads();s.resources->Loader().ServiceResourceLoading();
-            s.replayAvailableBytes=s.host.AvailableMemory();
+            s.ServiceFrameResources();
         }
         if(!simulationBehind)
             s.host.WaitUntil(std::min(s.simulationClock.Deadline(),s.host.PresentationDeadline()));
@@ -1114,20 +1193,55 @@ bool ApplicationRuntime::Tick()
         s.renderCaptureMs+=captureMs;s.renderSealMs+=sealMs;
         s.renderLogicalUpdates+=logicalUpdates;s.renderSceneCaptures+=sceneCaptures;
         s.renderPreparedFrames+=renderTiming.reusedPreparation?1u:0u;
+        s.renderCompiledPipelines+=renderTiming.pipelineCreations;
+        s.renderPendingPipelineDraws+=renderTiming.pendingPipelineDraws;
+        s.renderGpuWorldVertices+=renderTiming.gpuWorldVertices;
+        s.renderSceneryPipelineHits+=renderTiming.sceneryPipelineHits;
         s.renderGatherMs+=renderTiming.gatherMilliseconds;s.renderFenceMs+=renderTiming.fenceWaitMilliseconds;
         s.renderSubmitMs+=renderTiming.recordSubmitMilliseconds;s.renderPresentMs+=renderTiming.presentMilliseconds;
+        const auto& profile=renderTiming.renderProfile;
+        s.renderProfile.gatherValidationMilliseconds+=profile.gatherValidationMilliseconds;
+        s.renderProfile.gatherFinishMilliseconds+=profile.gatherFinishMilliseconds;
+        s.renderProfile.pipelineLookupMilliseconds+=profile.pipelineLookupMilliseconds;
+        s.renderProfile.recordSceneMilliseconds+=profile.recordSceneMilliseconds;
+        s.renderProfile.queueSubmitMilliseconds+=profile.queueSubmitMilliseconds;
+        s.renderProfile.shadowGatherSamples+=profile.shadowGatherSamples;
+        for(std::size_t shadow=0;shadow<profile.shadowStrips.size();++shadow) {
+            s.renderProfile.shadowStrips[shadow]+=profile.shadowStrips[shadow];
+            s.renderProfile.shadowTriangles[shadow]+=profile.shadowTriangles[shadow];
+            s.renderProfile.shadowGatherMilliseconds[shadow]+=profile.shadowGatherMilliseconds[shadow];
+        }
         if(renderTiming.gpuTimeAvailable && renderTiming.completedGpuFrame!=s.lastCompletedGpuFrame) {
             ++s.gpuTimedFrames;s.renderGpuMs+=renderTiming.gpuMilliseconds;
             s.lastCompletedGpuFrame=renderTiming.completedGpuFrame;
+            const auto& gpu=renderTiming.gpuProfile;
+            if(gpu.available) {
+                ++s.renderGpuProfileSamples;
+                s.renderGpuProfile.setupMilliseconds+=gpu.setupMilliseconds;
+                s.renderGpuProfile.mainMilliseconds+=gpu.mainMilliseconds;
+                s.renderGpuProfile.mirrorMilliseconds+=gpu.mirrorMilliseconds;
+                s.renderGpuProfile.auxMilliseconds+=gpu.auxMilliseconds;
+                s.renderGpuProfile.tailMilliseconds+=gpu.tailMilliseconds;
+            }
         }
         const auto timingObserved=s.host.FrameTime();
+        if(renderTiming.presentAccepted) {
+            if(s.lastAcceptedPresent!=NativeFrameTiming::Clock::time_point{}) {
+                const auto interval=std::chrono::duration<double,std::milli>(
+                    timingObserved-s.lastAcceptedPresent).count();
+                s.longestPresentIntervalMs=std::max(s.longestPresentIntervalMs,interval);
+                s.presentsOver33ms+=interval>1000.0/30.0;
+                s.presentsOver50ms+=interval>50.0;
+            }
+            s.lastAcceptedPresent=timingObserved;
+        }
         if(timingObserved-s.renderTimingWindowStart>=std::chrono::seconds(5)) {
             const auto count=static_cast<double>(s.renderTimedFrames);
             const auto windowMilliseconds=std::chrono::duration<double,std::milli>(timingObserved-s.renderTimingWindowStart).count();
             char detail[768]{};
             std::snprintf(detail,sizeof(detail),
                 "frames=%llu cpu_update_ms=%.3f cpu_gather_ms=%.3f cpu_submit_ms=%.3f fence_wait_ms=%.3f present_ms=%.3f gpu_ms=%.3f gpu_samples=%llu gpu_completed_frame=%llu hud_fps=%.2f hud_frame_ms=%.3f "
-                "cpu_update_only_ms=%.3f cpu_capture_ms=%.3f cpu_seal_ms=%.3f logical_updates=%llu scene_captures=%llu window_ms=%.3f prepared_frames=%llu",
+                "cpu_update_only_ms=%.3f cpu_capture_ms=%.3f cpu_seal_ms=%.3f logical_updates=%llu scene_captures=%llu window_ms=%.3f prepared_frames=%llu compiled_pipelines=%llu skipped_pipeline_draws=%llu cpu_cars_ms=%.3f gpu_world_vertices=%llu cached_scenery_strips=%llu scenery_pipeline_hits=%llu",
                 static_cast<unsigned long long>(s.renderTimedFrames),s.renderUpdateMs/count,s.renderGatherMs/count,
                 s.renderSubmitMs/count,s.renderFenceMs/count,s.renderPresentMs/count,
                 s.gpuTimedFrames?s.renderGpuMs/static_cast<double>(s.gpuTimedFrames):0.0,
@@ -1137,11 +1251,70 @@ bool ApplicationRuntime::Tick()
                 s.renderCaptureMs/count,s.renderSealMs/count,
                 static_cast<unsigned long long>(s.renderLogicalUpdates),
                 static_cast<unsigned long long>(s.renderSceneCaptures),windowMilliseconds,
-                static_cast<unsigned long long>(s.renderPreparedFrames));
+                static_cast<unsigned long long>(s.renderPreparedFrames),
+                static_cast<unsigned long long>(s.renderCompiledPipelines),
+                static_cast<unsigned long long>(s.renderPendingPipelineDraws),s.renderCarCaptureMs/count,
+                static_cast<unsigned long long>(s.renderGpuWorldVertices),
+                static_cast<unsigned long long>(s.renderCachedSceneryStrips),
+                static_cast<unsigned long long>(s.renderSceneryPipelineHits));
             s.host.RecordSessionEvent("render.timing_window",detail);
+            const auto milliseconds=[](std::uint64_t ns){return static_cast<double>(ns)*1.0e-6;};
+            std::snprintf(detail,sizeof(detail),
+                "world_loop=%d scenario=%d world_steps=%llu world_ms=%.3f world_step_peak_ms=%.3f "
+                "think_ms=%.3f drive_ms=%.3f collision_ms=%.3f world_effects_ms=%.3f world_finish_ms=%.3f "
+                "audio_ms=%.3f audio_step_peak_ms=%.3f input_ms=%.3f resource_ms=%.3f resource_peak_ms=%.3f "
+                "scenery_ms=%.3f scenery_view_peak_ms=%.3f present_interval_peak_ms=%.3f intervals_over_33ms=%llu intervals_over_50ms=%llu",
+                s.clock.worldLoopCounter,s.parameters.selectedScenario,
+                static_cast<unsigned long long>(s.worldTiming.calls),
+                milliseconds(s.worldTiming.totalNanoseconds)/count,milliseconds(s.worldTiming.maximumNanoseconds),
+                s.worldProfile.thinkingMs/count,s.worldProfile.driveMs/count,s.worldProfile.collisionMs/count,
+                s.worldProfile.effectsMs/count,s.worldProfile.finishMs/count,
+                milliseconds(s.audioTiming.totalNanoseconds)/count,milliseconds(s.audioTiming.maximumNanoseconds),
+                milliseconds(s.inputTiming.totalNanoseconds)/count,
+                milliseconds(s.resourceTiming.totalNanoseconds)/count,milliseconds(s.resourceTiming.maximumNanoseconds),
+                milliseconds(s.sceneryTiming.totalNanoseconds)/count,milliseconds(s.sceneryTiming.maximumNanoseconds),
+                s.longestPresentIntervalMs,static_cast<unsigned long long>(s.presentsOver33ms),
+                static_cast<unsigned long long>(s.presentsOver50ms));
+            s.host.RecordSessionEvent("render.phase_window",detail);
+            const auto& cpu=s.renderProfile;
+            const auto shadowSamples=static_cast<double>(std::max<std::uint64_t>(1,cpu.shadowGatherSamples));
+            std::snprintf(detail,sizeof(detail),
+                "scenario=%d fps=%.2f cpu_sun_shadow_capture_ms=%.3f cpu_road_shadow_capture_ms=%.3f "
+                "sun_shadow_strips=%.1f road_shadow_strips=%.1f sun_shadow_triangles=%.1f road_shadow_triangles=%.1f "
+                "shadow_gather_samples=%llu cpu_sun_shadow_gather_ms=%.3f cpu_road_shadow_gather_ms=%.3f "
+                "cpu_gather_validate_ms=%.3f cpu_gather_packets_ms=%.3f cpu_gather_finish_ms=%.3f "
+                "cpu_pipeline_lookup_ms=%.3f cpu_record_scene_ms=%.3f cpu_queue_submit_ms=%.3f cpu_submit_other_ms=%.3f",
+                s.parameters.selectedScenario,1000.0*count/windowMilliseconds,
+                s.renderShadowCaptureMs[0]/count,s.renderShadowCaptureMs[1]/count,
+                cpu.shadowStrips[0]/count,cpu.shadowStrips[1]/count,cpu.shadowTriangles[0]/count,cpu.shadowTriangles[1]/count,
+                static_cast<unsigned long long>(cpu.shadowGatherSamples),
+                cpu.shadowGatherMilliseconds[0]/shadowSamples,cpu.shadowGatherMilliseconds[1]/shadowSamples,
+                cpu.gatherValidationMilliseconds/count,
+                std::max(0.0,s.renderGatherMs-cpu.gatherValidationMilliseconds-cpu.gatherFinishMilliseconds)/count,
+                cpu.gatherFinishMilliseconds/count,cpu.pipelineLookupMilliseconds/count,
+                cpu.recordSceneMilliseconds/count,cpu.queueSubmitMilliseconds/count,
+                std::max(0.0,s.renderSubmitMs-cpu.pipelineLookupMilliseconds-cpu.recordSceneMilliseconds-cpu.queueSubmitMilliseconds)/count);
+            s.host.RecordSessionEvent("render.detail_window",detail);
+            if(s.renderGpuProfileSamples) {
+                const auto samples=static_cast<double>(s.renderGpuProfileSamples);
+                const auto& gpu=s.renderGpuProfile;
+                std::snprintf(detail,sizeof(detail),
+                    "scenario=%d samples=%llu gpu_setup_span_ms=%.3f gpu_main_span_ms=%.3f gpu_mirror_span_ms=%.3f "
+                    "gpu_aux_span_ms=%.3f gpu_tail_span_ms=%.3f",
+                    s.parameters.selectedScenario,static_cast<unsigned long long>(s.renderGpuProfileSamples),
+                    gpu.setupMilliseconds/samples,gpu.mainMilliseconds/samples,gpu.mirrorMilliseconds/samples,
+                    gpu.auxMilliseconds/samples,gpu.tailMilliseconds/samples);
+                s.host.RecordSessionEvent("render.gpu_pass_window",detail);
+            }
+            s.renderShadowCaptureMs={};s.renderProfile={};s.renderGpuProfile={};s.renderGpuProfileSamples=0;
+            s.worldProfile={};s.worldTiming={};s.audioTiming={};s.inputTiming={};
+            s.resourceTiming={};s.sceneryTiming={};
+            s.presentsOver33ms=0;s.presentsOver50ms=0;s.longestPresentIntervalMs=0.0;
             s.renderTimingWindowStart=timingObserved;s.renderTimedFrames=0;s.gpuTimedFrames=0;
             s.renderUpdateMs=0.0;s.renderCaptureMs=0.0;s.renderSealMs=0.0;
             s.renderLogicalUpdates=0;s.renderSceneCaptures=0;s.renderPreparedFrames=0;
+            s.renderCompiledPipelines=0;s.renderPendingPipelineDraws=0;s.renderCarCaptureMs=0.0;
+            s.renderGpuWorldVertices=0;s.renderCachedSceneryStrips=0;s.renderSceneryPipelineHits=0;
             s.renderGatherMs=0.0;s.renderFenceMs=0.0;
             s.renderSubmitMs=0.0;s.renderPresentMs=0.0;s.renderGpuMs=0.0;
         }
@@ -1149,8 +1322,7 @@ bool ApplicationRuntime::Tick()
 
     Require(s.frame->State()==EcstasyFrame::Phase::Complete,"Physical presenter did not retire the CPU frame capture");
     if(advancedPresentation) {
-        texturePackRegistry.ServiceReads();s.resources->Loader().ServiceResourceLoading();
-        s.replayAvailableBytes=s.host.AvailableMemory();
+        s.ServiceFrameResources();
     }
     if(s.preparedSceneValid && !s.PreparedSceneUnchanged())s.InvalidatePreparedScene();
     // No PAL/NTSC wait: presentation follows the physical backend/VSync.

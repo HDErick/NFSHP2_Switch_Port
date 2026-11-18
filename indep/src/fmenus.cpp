@@ -6,6 +6,9 @@
 #include "bware/inc/bWare.hpp"
 #include "Flags.hpp"
 #include "FEAnim.hpp"
+#ifdef __SWITCH__
+#include "src/nx/display_options.hpp"
+#endif
 #include "GameFlow.hpp"
 #include "indep/src/MoviePlayer/MV3Codec.h"
 #include <cstdio>
@@ -655,6 +658,9 @@ void FlailerScreen::SetActiveMenuItem(std::uint32_t key)
 FlailerMenuStorage::FlailerMenuStorage(FlailerUiState& ui,FlailerScreen& screen,std::int32_t selected,
     const char* itemFormat)
 {
+#ifdef __SWITCH__
+    nx::PrepareDisplayMenu(ui,static_cast<std::uint32_t>(screen.screenId));
+#endif
     menu_.root.next=menu_.root.previous=&menu_.root;
     menu_.callback=screen.callback;menu_.ui=&ui;
     menu_.screenKey=static_cast<std::uint32_t>(screen.screenId);menu_.joystickPort=screen.joystickPort;
@@ -662,7 +668,11 @@ FlailerMenuStorage::FlailerMenuStorage(FlailerUiState& ui,FlailerScreen& screen,
         char name[128];
         const int written=std::snprintf(name,sizeof(name),itemFormat,index);
         Require(written>=0 && static_cast<std::size_t>(written)<sizeof(name),"Menu item name exceeds its native buffer");
-        const auto key=hashString(name);
+        auto key=hashString(name);
+#ifdef __SWITCH__
+        key=nx::DisplayMenuItem(menu_.screenKey,index,key);
+#endif
+        if(!key)continue;
         auto* object=ui.resources->FindObject(menu_.screenKey,key,1);
         if (!object) continue;
         auto item=std::make_unique<FlailerMenuItem>(&menu_,key,index);
@@ -1199,6 +1209,7 @@ extern "C" GameInputResult flailerFrontendDispatchInput(FlailerFrontendInput* in
     std::int32_t port,std::int32_t event,std::uint8_t value)
 {
     if (!input || !input->screens || input->screens->input!=input) return GAME_INPUT_INVALID_BINDING;
+    input->dispatchFailure={};
     try { input->screens->JoyHandler(port,event,value);return GAME_INPUT_OK; }
-    catch (const std::exception&) { return GAME_INPUT_OWNER_FAILURE; }
+    catch (...) {input->dispatchFailure=std::current_exception();return GAME_INPUT_OWNER_FAILURE;}
 }

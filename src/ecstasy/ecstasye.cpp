@@ -36,6 +36,10 @@
 #include "bware/inc/bMath.hpp"
 #include <cstring>
 #include <algorithm>
+#ifdef __SWITCH__
+#include <switch.h>
+#include "src/nx/controller_art.hpp"
+#endif
 #include <cmath>
 #include <vector>
 #include <atomic>
@@ -77,7 +81,6 @@ EditorMarkerTexture* findModelTexture(EditorMarkerResources* root,uint32_t key)
 namespace hp2 {
 unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
 {
-    const unsigned reported=std::max(1u,std::thread::hardware_concurrency());
 #if defined(_WIN32)
     DWORD_PTR processMask=0,systemMask=0;
     const bool processKnown=GetProcessAffinityMask(GetCurrentProcess(),&processMask,&systemMask)!=FALSE;
@@ -118,6 +121,15 @@ unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
         while(affinityMask) {affinityMask&=affinityMask-1;++count;}
         return count;
     }
+#elif defined(__SWITCH__)
+    // Visibility checks ask for the worker budget many times per frame.
+    static const unsigned cores=[] {
+        u64 allowed{};
+        if(R_SUCCEEDED(svcGetInfo(&allowed,InfoType_CoreMask,CUR_PROCESS_HANDLE,0)) && allowed)
+            return static_cast<unsigned>(__builtin_popcountll(allowed));
+        return std::max(1u,std::thread::hardware_concurrency());
+    }();
+    return cores;
 #elif defined(__linux__)
     cpu_set_t allowed;
     CPU_ZERO(&allowed);
@@ -128,8 +140,17 @@ unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
 #endif
     // A failed optional affinity query does not make a multicore CPU a
     // single-core machine. The OS still enforces its actual affinity.
-    return reported;
+    return std::max(1u,std::thread::hardware_concurrency());
 }
+
+#ifdef __SWITCH__
+void ConfigureNativeSceneWorker() noexcept
+{
+    u64 mask{};
+    if(R_SUCCEEDED(svcGetInfo(&mask,InfoType_CoreMask,CUR_PROCESS_HANDLE,0)) && mask)
+        (void)svcSetThreadCoreMask(CUR_THREAD_HANDLE,-1,static_cast<u32>(mask));
+}
+#endif
 
 std::int32_t environmentMappingEnabled=1; // Released writable EnableEnvMap32F720.
 std::array<float,2> textureAnimationScrollSpeed{};
@@ -213,6 +234,7 @@ void ResourceRegistry::ResourceRefresh()
     auto& models=storage_->models;
     if (models.fixupsBlocked)return;
     if (models.modelsChanged || models.texturesChanged) {
+        texturePackRegistry.InvalidateDescriptorIndex();
         if (models.texturesChanged)
             for (auto* catalogue=&models;catalogue;catalogue=catalogue->nextCatalogue)
                 for (std::size_t index=0;index<catalogue->solidCount;++index)
@@ -339,6 +361,7 @@ void EditorMarkerSolidGeometry::FixLightMaterialTable(hp2::ResourceRegistry& res
 
 void EditorMarkerSolidGeometry::Strip::PrepareNativeTopology()
 {
+    if(nativeVertexRevision)StampNativeVertexRevision();
     const std::size_t count=positions.size();
     hp2::Require(count<=48,"Native solid strip topology exceeds source vertex limit");
     nativeUniqueOrder.clear();nativeTriangleOrder.clear();
@@ -362,6 +385,12 @@ void EditorMarkerSolidGeometry::Strip::PrepareNativeTopology()
     nativeTopologyMask=drawDisableMask;
 }
 
+void EditorMarkerSolidGeometry::Strip::StampNativeVertexRevision() noexcept
+{
+    static std::atomic<std::uint64_t> nextRevision{};
+    nativeVertexRevision=nextRevision.fetch_add(1,std::memory_order_relaxed)+1;
+}
+
 void EditorMarkerSolidGeometry::FixStripSTs()
 {
     for (auto& strip:strips) {
@@ -379,6 +408,7 @@ void EditorMarkerSolidGeometry::FixStripSTs()
             inverses[axis]=finiteRatio(1.0f,static_cast<float>(strip.textureScales[axis])*0.000030517578125f);
         }
         if (!changed[0] && !changed[1])continue;
+        if(strip.nativeVertexRevision)strip.StampNativeVertexRevision();
         for (auto& st:strip.textureCoordinates)
             for (int axis=0;axis<2;++axis)if (changed[axis]) {
                 st[axis]*=inverses[axis];st[axis]*=ratios[axis];
@@ -697,6 +727,7 @@ void ecstasyCallDamageVertexFunction(EditorMarkerModel* model,BodyDamageModel* d
         const auto damageFlag=static_cast<std::int32_t>(strip.flags&0x0800u);
         hp2::Require(strip.colors.size()==strip.positions.size(),
             "Damage traversal requires the original RGB555 channel for every vertex");
+        if(strip.nativeVertexRevision)strip.StampNativeVertexRevision();
         std::int32_t damaged=0;
         for (std::size_t vertex=0;vertex<strip.positions.size();++vertex) {
             // PAL unpacks XYZ, calls the real function, then packs XYZ back.
@@ -1567,7 +1598,7 @@ std::unique_ptr<EditorMarkerSolidGeometry> decodeSolidGeometry(const std::vector
         }
         // Keep the original decoded strip immutable and prepare its native
         // index topology once, not once per camera, lighting or alpha pass.
-        strip.PrepareNativeTopology();
+        strip.PrepareNativeTopology();strip.StampNativeVertexRevision();
         geometry->strips.push_back(std::move(strip));
     }
     std::size_t decodedVertices=0;
@@ -1809,6 +1840,46 @@ void EcstasyFrame::AdvanceTextureAnimationsAfterCompletion(ResourceRegistry& res
     textureAnimationWorldFrames_=clock.worldTimeFrames;textureAnimationRealFrames_=clock.realTimeFrames;
 }
 EcstasyFrame::EcstasyFrame()=default;
+
+const EcstasyDrawInstance& EcstasyFrame::CaptureInstance(const float localToWorld[16],
+    const CarCinematicScreen& view,const SceneLightContext* lightContext)
+{
+    Require(phase_==Phase::Building && localToWorld && view.matricesCalculated,"Draw instance lost its active capture, transform or projection");
+    if(liveInstances_==capturedInstances_.size())capturedInstances_.emplace_back();
+    auto& instance=capturedInstances_[liveInstances_];
+    eMulMatrix(instance.localToClip.data(),localToWorld,view.matrices.worldToClip);
+    if(lightContext)instance.lightContext=*lightContext;
+    else instance.lightContext.reset();
+    ++liveInstances_;
+    return instance;
+}
+
+const EcstasyDrawProjection& EcstasyFrame::CaptureProjection(const CarCinematicScreen& view)
+{
+    Require(phase_==Phase::Building,"Projection capture requires a building frame");
+    const auto& source=view.matrices;
+    if(lastProjection_ &&
+        std::memcmp(lastProjection_->matrices[0].data(),source.clipToScreen,sizeof(source.clipToScreen))==0 &&
+        std::memcmp(&lastProjection_->nearSource,&source.nearProjection,sizeof(source.nearProjection))==0 &&
+        std::memcmp(&lastProjection_->frustumSource,&source.frustumProjection,sizeof(source.frustumProjection))==0)
+        return *lastProjection_;
+    if(liveProjections_==capturedProjections_.size())capturedProjections_.emplace_back();
+    auto& snapshot=capturedProjections_[liveProjections_];
+    std::copy_n(source.clipToScreen,16,snapshot.matrices[0].begin());
+    snapshot.nearSource=source.nearProjection;
+    snapshot.frustumSource=source.frustumProjection;
+    const auto capture=[](std::array<float,16>& matrix,const EcstasyProjectionPair& projection) {
+        matrix.fill(0.0f);
+        for(std::size_t axis=0;axis<3;++axis)matrix[axis*5]=projection.diagonal[axis];
+        std::copy_n(projection.translation,4,matrix.begin()+12);
+    };
+    capture(snapshot.matrices[1],source.nearProjection);
+    capture(snapshot.matrices[2],source.frustumProjection);
+    ++liveProjections_;
+    lastProjection_=&snapshot;
+    return snapshot;
+}
+
 void EcstasyFrame::CaptureEnvironment(EnvironmentMap* environment,ResourceRegistry& resources,
     std::int32_t applicationState,std::uint32_t renderFrameCounter,bool inGame)
 {
@@ -1983,7 +2054,7 @@ void EcstasyFrame::AddPolygon(const frontend::FlailerPoly& polygon,
     command.uiPlacement=placement;
     command.polygon=&polygon;command.texture=texture;command.view=&view;command.target=view.target;
     if(neutralTextureOperand)command.orderingTexture=orderingTexture;
-    std::copy(view.matrices.clipToScreen,view.matrices.clipToScreen+16,command.clipToScreen.begin());
+    command.clipToScreen=&CaptureProjection(view).matrices[0];
     command.rasterState=polygon.rasterState;command.layer=layer;command.alphaScale=alphaScale;
     command.depthSorted=texture->requiresDepthSort;
     if(command.depthSorted) {
@@ -2158,7 +2229,7 @@ void EcstasyFrame::RenderScreenPolygon(const frontend::FlailerPoly& polygon,
     command.polygon=owned.get();command.texture=texture;command.view=&view;command.target=view.target;
     command.rasterState=owned->rasterState;command.zWriteEnabled=zWriteEnabled_;
     command.depthSorted=texture->requiresDepthSort;command.sortDepth=polygon.vertices[0].position[2];
-    std::copy(view.matrices.clipToScreen,view.matrices.clipToScreen+16,command.clipToScreen.begin());
+    command.clipToScreen=&CaptureProjection(view).matrices[0];
     worldPolygons_.push_back(std::move(owned));
     try {commands_.push_back(command);}catch(...) {worldPolygons_.pop_back();throw;}
 }
@@ -2299,7 +2370,7 @@ void EcstasyFrame::OverlayRVMImages(const CarCinematicServices& views,ResourceRe
         }
         EcstasyDrawCommand command;command.kind=EcstasyDrawKind::MirrorOverlayPolygon;
         command.polygon=polygon.get();command.texture=texture;command.view=&rear;command.target=rear.target;
-        std::copy(rear.matrices.clipToScreen,rear.matrices.clipToScreen+16,command.clipToScreen.begin());
+        command.clipToScreen=&CaptureProjection(rear).matrices[0];
         command.rasterState=polygon->rasterState;command.zWriteEnabled=zWriteEnabled_;
         command.depthSorted=texture->requiresDepthSort;command.sortDepth=maximum;
         worldPolygons_.push_back(std::move(polygon));
@@ -2421,7 +2492,7 @@ void EcstasyFrame::DisplayRVMs(const CarCinematicServices& views,const CarCinema
     }
     EcstasyDrawCommand command;command.kind=EcstasyDrawKind::RenderTargetPolygon;
     command.polygon=polygon.get();command.view=&destination;command.target=destination.target;
-    std::copy(destination.matrices.clipToScreen,destination.matrices.clipToScreen+16,command.clipToScreen.begin());
+    command.clipToScreen=&CaptureProjection(destination).matrices[0];
     command.sampledTarget=rear.target;command.zWriteEnabled=zWriteEnabled_;
     command.rasterState=polygon->rasterState;
     worldPolygons_.push_back(std::move(polygon));
@@ -2529,7 +2600,7 @@ void EcstasyFrame::DisplayRadialBlur(const CarCinematicServices& views)
             command.polygon=owned.get();command.texture=view.radialBlurTexture;
             command.view=&view;command.target=view.target;command.rasterState=polygon.rasterState;
             command.zWriteEnabled=zWriteEnabled_;
-            std::copy(view.matrices.clipToScreen,view.matrices.clipToScreen+16,command.clipToScreen.begin());
+            command.clipToScreen=&CaptureProjection(view).matrices[0];
             worldPolygons_.push_back(std::move(owned));
             try {commands_.push_back(command);}catch(...) {worldPolygons_.pop_back();throw;}
         }
@@ -2572,7 +2643,7 @@ void EcstasyFrame::DisplayBlendPrevious(const CarCinematicServices& views)
         command.polygon=polygon.get();command.view=&view;command.target=view.target;
         command.sampledTarget=previous;command.sampledPreviousFrame=true;
         command.zWriteEnabled=zWriteEnabled_;command.rasterState=polygon->rasterState;
-        std::copy(view.matrices.clipToScreen,view.matrices.clipToScreen+16,command.clipToScreen.begin());
+        command.clipToScreen=&CaptureProjection(view).matrices[0];
         worldPolygons_.push_back(std::move(polygon));
         try {commands_.push_back(command);}catch(...) {worldPolygons_.pop_back();throw;}
         AttachSolidPolys(); // PAL10F670 calls10BB20: history solid chain only.
@@ -2580,8 +2651,8 @@ void EcstasyFrame::DisplayBlendPrevious(const CarCinematicServices& views)
 }
 
 namespace {
-void CaptureMaterialProjection(std::array<float,16>& output,const TextureInfo& texture,
-    const CarCinematicScreen& view)
+const std::array<float,16>& CaptureMaterialProjection(
+    const TextureInfo& texture,const EcstasyDrawProjection& projection)
 {
     // PAL AttachSolidPolys10BC0C/10BC54..10BC78 and
     // AttachAlphaPolys10B9D8..10BA04 select the target's +8C/+90/+94
@@ -2592,14 +2663,7 @@ void CaptureMaterialProjection(std::array<float,16>& output,const TextureInfo& t
     if(!texture.descriptor || !texture.descriptor->authoredRecord || texture.descriptor->authoredRecordSize<164)
         throw std::runtime_error("World material lost its original projection selector");
     const auto mode=texture.descriptor->authoredRecord[0x75];
-    if(mode!=1 && mode!=2) {
-        std::copy(view.matrices.clipToScreen,view.matrices.clipToScreen+16,output.begin());
-        return;
-    }
-    const auto& projection=mode==1 ? view.matrices.nearProjection:view.matrices.frustumProjection;
-    output.fill(0.0f);
-    for(std::size_t axis=0;axis<3;++axis)output[axis*5]=projection.diagonal[axis];
-    std::copy(projection.translation,projection.translation+4,output.begin()+12);
+    return projection.matrices[mode==1 || mode==2 ? mode:0];
 }
 }
 
@@ -2617,10 +2681,9 @@ void EcstasyFrame::RenderPolygon3D(const frontend::FlailerPoly& polygon,
     EcstasyDrawCommand command;command.zWriteEnabled=zWriteEnabled_;
     command.kind=EcstasyDrawKind::WorldPolygon;command.polygon=owned.get();
     command.textureQScale=view.pixelScale;
-    CaptureMaterialProjection(command.clipToScreen,*texture,view);
+    command.clipToScreen=&CaptureMaterialProjection(*texture,CaptureProjection(view));
     command.texture=texture;command.view=&view;command.target=view.target;
-    std::copy(localToWorld,localToWorld+16,command.localToWorld.begin());
-    eMulMatrix(command.localToClip.data(),localToWorld,view.matrices.worldToClip);
+    command.instance=&CaptureInstance(localToWorld,view);
     command.rasterState=polygon.rasterState;command.drawFlags=0x200u;
     command.vertexOrder={0,1,3,2};command.depthSorted=texture->requiresDepthSort;
     if (command.depthSorted) {
@@ -2634,7 +2697,7 @@ void EcstasyFrame::RenderPolygon3D(const frontend::FlailerPoly& polygon,
 }
 
 void EcstasyFrame::RenderWorldStrip(const std::vector<frontend::FlailerPolyVertex>& vertices,
-    const TextureInfo& texture,const float localToWorld[16],const CarCinematicScreen& view)
+    const TextureInfo& texture,const float localToWorld[16],const CarCinematicScreen& view,EcstasyCarShadow shadow)
 {
     Require(phase_==Phase::Building,"Cannot append world strip to a sealed graphics frame");
     Require(localToWorld && view.target && view.target->enabled && view.matricesCalculated &&
@@ -2644,11 +2707,11 @@ void EcstasyFrame::RenderWorldStrip(const std::vector<frontend::FlailerPolyVerte
     auto owned=std::make_unique<std::vector<frontend::FlailerPolyVertex>>(vertices);
     EcstasyDrawCommand command;command.kind=EcstasyDrawKind::WorldStrip;
     command.textureQScale=view.pixelScale;
-    CaptureMaterialProjection(command.clipToScreen,texture,view);
+    command.clipToScreen=&CaptureMaterialProjection(texture,CaptureProjection(view));
     command.worldStrip=owned.get();command.texture=&texture;command.view=&view;command.target=view.target;
+    command.carShadow=shadow;
     command.zWriteEnabled=zWriteEnabled_;command.drawFlags=0x200u;
-    std::copy(localToWorld,localToWorld+16,command.localToWorld.begin());
-    eMulMatrix(command.localToClip.data(),localToWorld,view.matrices.worldToClip);
+    command.instance=&CaptureInstance(localToWorld,view);
     command.depthSorted=texture.requiresDepthSort;
     if(command.depthSorted) {
         float depth[4];eMulVector3(depth,view.matrices.worldToView,vertices.front().position.data());
@@ -2661,6 +2724,8 @@ void EcstasyFrame::RenderWorldStrip(const std::vector<frontend::FlailerPolyVerte
 struct EcstasyFrame::StripCaptureState {
     // Constructed once on the issuing thread, before workers observe it.
     EcstasyDrawCommand command;
+    const EcstasyDrawInstance* instance{};
+    const EcstasyDrawProjection* projection{};
     Phase phase{};
     bool zWriteEnabled{},dashboardProjection{},inGameMaterials{},environmentUpdated{};
     const TextureInfo* frontendEnvironmentTexture{};
@@ -2689,9 +2754,11 @@ void EcstasyFrame::RenderStrip(const EditorMarkerModel& model,
     const CarCinematicScreen& view,std::int32_t clipClass,std::uint32_t flags,float alphaScale,
     const SceneLightContext* lightContext)
 {
-    const auto state=CaptureStripState();
+    auto state=CaptureStripState();
+    state.instance=&CaptureInstance(localToWorld,view,lightContext);
+    state.projection=&CaptureProjection(view);
     CaptureStrip(commands_,nextAlphaGroup_,state,model,strip,texture,material,
-        localToWorld,view,clipClass,flags,alphaScale,lightContext,nullptr);
+        localToWorld,view,clipClass,flags,alphaScale,lightContext);
 }
 
 void EcstasyFrame::CaptureStrip(std::vector<EcstasyDrawCommand>& output,
@@ -2699,7 +2766,7 @@ void EcstasyFrame::CaptureStrip(std::vector<EcstasyDrawCommand>& output,
     const EditorMarkerSolidGeometry::Strip& strip,const TextureInfo& texture,
     const EditorMarkerLightMaterial* material,const float localToWorld[16],
     const CarCinematicScreen& view,std::int32_t clipClass,std::uint32_t flags,float alphaScale,
-    const SceneLightContext* lightContext,const float preparedLocalToClip[16])
+    const SceneLightContext* lightContext)
 {
     Require(state.phase==Phase::Building,"Cannot append model geometry to a sealed frame");
     Require(localToWorld && view.target && view.target->enabled && view.matricesCalculated &&
@@ -2710,20 +2777,11 @@ void EcstasyFrame::CaptureStrip(std::vector<EcstasyDrawCommand>& output,
     auto command=state.command;command.zWriteEnabled=state.zWriteEnabled;
     command.kind=EcstasyDrawKind::SolidStrip;command.strip=&strip;command.model=&model;
     command.textureQScale=view.pixelScale;
-    CaptureMaterialProjection(command.clipToScreen,texture,view);
-    if(state.dashboardProjection) {
-        const auto& projection=view.matrices.frustumProjection;
-        command.clipToScreen.fill(0.0f);
-        for(std::size_t axis=0;axis<3;++axis)command.clipToScreen[axis*5]=projection.diagonal[axis];
-        std::copy(projection.translation,projection.translation+4,command.clipToScreen.begin()+12);
-    }
+    command.clipToScreen=&CaptureMaterialProjection(texture,*state.projection);
+    if(state.dashboardProjection)command.clipToScreen=&state.projection->matrices[2];
     if(material && state.inGameMaterials && material->inGameVariant)material=material->inGameVariant.get();
     command.texture=&texture;command.lightMaterial=material;command.view=&view;command.target=view.target;
-    if(lightContext)command.lightContext=*lightContext;
-    std::copy(localToWorld,localToWorld+16,command.localToWorld.begin());
-    if(preparedLocalToClip)
-        std::copy(preparedLocalToClip,preparedLocalToClip+16,command.localToClip.begin());
-    else eMulMatrix(command.localToClip.data(),localToWorld,view.matrices.worldToClip);
+    command.instance=state.instance;
     command.clipClass=clipClass;command.drawFlags=flags;command.alphaScale=alphaScale;
     command.depthSorted=texture.requiresDepthSort;
     if (command.depthSorted) {
@@ -2980,6 +3038,71 @@ EcstasyReflectionVertex EcstasyReflectVertex(const SceneLightContext& context,
     return ReflectNativeVertex(context,material,position,normal,color,flags,nullptr);
 }
 
+bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
+    const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext)
+{
+    const auto* solid=model.solid;
+    if(!solid || !solid->geometry || model.replacement || solid->rigidAnimation ||
+        solid->vertexAnimation || (solid->renderFlags&0x1000u) ||
+        dashboardProjection_ || !zWriteEnabled_)return false;
+
+    const auto& geometry=*solid->geometry;
+    const auto revision=texturePackRegistry.BindingRevision();
+    const bool reused=batch.geometry==&geometry && batch.textureRevision==revision &&
+        batch.bindings.size()==geometry.textures.size() &&
+        std::equal(batch.bindings.begin(),batch.bindings.end(),geometry.textures.begin(),
+            [](const auto* saved,const auto& live) {return saved==live.texture;});
+    if(!reused) {
+        batch.textureRevision=0;
+        batch.geometry=&geometry;
+        batch.eligible=true;
+        batch.bindings.clear();batch.strips.clear();
+        for(const auto& binding:geometry.textures)batch.bindings.push_back(binding.texture);
+        for(const auto& strip:geometry.strips) {
+            if((strip.flags&0x400u) || strip.positions.size()<3)continue;
+            const auto index=static_cast<std::size_t>(strip.textureIndex);
+            const auto* texture=index<batch.bindings.size() && batch.bindings[index]?
+                textureInfoForDescriptor(batch.bindings[index]):nullptr;
+            if(!texture || texture->requiresDepthSort || (strip.flags&0x140u)) {
+                batch.eligible=false;
+                break;
+            }
+            batch.strips.push_back({&strip,texture,
+                static_cast<std::uint32_t>(strip.flags)|(texture->drawFlag4Enabled?4u:0u)});
+        }
+        batch.textureRevision=revision;
+    }
+    if(!batch.eligible || std::any_of(batch.strips.begin(),batch.strips.end(),
+        [](const auto& strip) {return !strip.texture->pixels.Data();}))return false;
+
+    Require(phase_==Phase::Building && view.target && view.target->enabled && view.matricesCalculated,
+        "Opaque scenery batch lost its live view");
+    EcstasyDrawCommand command;
+    command.kind=EcstasyDrawKind::SolidStrip;command.model=&model;command.cachedOpaqueScenery=true;
+    command.view=&view;command.target=view.target;command.clipClass=2;
+    command.textureQScale=view.pixelScale;
+    command.instance=&CaptureInstance(localToWorld,view,lightContext);
+    const auto& projection=CaptureProjection(view);
+    const auto* root=model.resources && model.resources->catalogueRoot ?
+        model.resources->catalogueRoot:model.resources;
+    const auto* fallback=root?root->defaultLightMaterial:nullptr;
+    for(const auto& strip:batch.strips) {
+        if(command.texture!=strip.texture) {
+            command.texture=strip.texture;
+            command.clipToScreen=&CaptureMaterialProjection(*strip.texture,projection);
+        }
+        command.strip=strip.geometry;command.drawFlags=lightContext?strip.flags:strip.flags&~0x1c0u;
+        const auto index=static_cast<std::size_t>(strip.geometry->lightMaterialIndex);
+        auto* material=index<geometry.lightMaterials.size()?geometry.lightMaterials[index]:nullptr;
+        if(!material)material=fallback;
+        command.lightMaterial=material && inGameMaterials_ && material->inGameVariant ?
+            material->inGameVariant.get():material;
+        commands_.push_back(command);
+    }
+    if(reused)reusedOpaqueSceneryStrips_+=batch.strips.size();
+    return true;
+}
+
 std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float localToWorld[16],
     const CarCinematicScreen& view,std::uint32_t flags,float alphaScale,std::int32_t worldFrames,
     const SceneLightContext* lightContext,const std::vector<std::array<float,16>>* boneMatrices)
@@ -3026,7 +3149,9 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
     if (model.replacement)editorMarkerModelApplyReplacementTextureTable(&model);
     const auto& geometry=*model.solid->geometry;
     const auto start=commands_.size();
-    const auto state=CaptureStripState();
+    auto state=CaptureStripState();
+    state.instance=&CaptureInstance(localToWorld,view,lightContext);
+    state.projection=&CaptureProjection(view);
     const bool environmentEnabled=environmentMappingEnabled!=0;
     std::size_t count=0;
     for(const auto& run:visible)count+=run.count;
@@ -3051,7 +3176,6 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
     // This exact multiplication is shared by the model's ordered strip
     // packets. The owner does not advance the view or any borrowed input
     // before RunNativeSceneJobs has drained, including exceptional exits.
-    float localToClip[16];eMulMatrix(localToClip,localToWorld,view.matrices.worldToClip);
     const auto capture=[&](std::size_t index,std::int32_t clipClass,
         std::vector<EcstasyDrawCommand>& output,
         std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>>& posedStrips,
@@ -3084,6 +3208,7 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
             // changes XYZ only. Its three embedded low bytes are two bone
             // indices and an unscaled8-bit blend value, not extra channels.
             auto animatedStrip=std::make_unique<EditorMarkerSolidGeometry::Strip>(strip);
+            animatedStrip->nativeVertexRevision=0;
             for(auto& position:animatedStrip->positions) {
                 std::array<std::uint32_t,3> encoded{};
                 std::memcpy(encoded.data(),position.data(),sizeof(encoded));
@@ -3106,7 +3231,7 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
             submitted=animatedStrip.get();posedStrips.push_back(std::move(animatedStrip));
         }
         CaptureStrip(output,alphaGroups,state,model,*submitted,*texture,material,localToWorld,
-            view,clipClass,draw,alphaScale,lightContext,localToClip);
+            view,clipClass,draw,alphaScale,lightContext);
     };
     if(!parallel) {
         for(const auto& run:visible)for(std::size_t index=run.first;index<run.first+run.count;++index)
@@ -3260,7 +3385,8 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         auto& view=views.screens[i];if(!active(view))continue;
         Require(ecstasyViewCalculateMatrices(&views,&view,100.0f,50000.0f,0)==CAR_CINEMATIC_OK,
             "Original sky projection could not be calculated");
-        ecstasyViewSetCurrent(&views,&view);sky->StuffSky(view,frame,scene.clock->worldTimeFrames);
+        ecstasyViewSetCurrent(&views,&view);
+        sky->StuffSky(view,frame,scene.clock->worldTimeFrames,scene.emitRaceGeometry);
     }
     frame.AttachAlphaPolys();
     frame.SetZWriteState(1);
@@ -3287,11 +3413,18 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         // Its0/1 gates are independent of the auxiliary-view bits.
         std::uint32_t mask=(views.presentationLayout==3 || views.presentationLayout==4) ? 0x10u:0x11u;
         if(view.id>=4 && view.id<10)mask|=0x102u;
-        if(scenery) {
+        // Only view 1 updates scenery LOD hysteresis. A discarded frame
+        // needs that state update, but no mirror or cubemap scenery walk.
+        if(scenery && (scene.emitRaceGeometry || view.id==1)) {
             Require(scene.parameters,"Scenery source filter has no live RaceParameters");
             if(scene.parameters->reverse==0)mask|=8u;
             if(scene.parameters->reverse==1)mask|=4u;
-            scenery->Render(view,frame,mask,scene.clock->worldTimeFrames);
+            const auto sceneryStarted=std::chrono::steady_clock::now();
+            scenery->Render(view,frame,mask,scene.clock->worldTimeFrames,scene.emitRaceGeometry);
+            if(scene.sceneryCaptureTiming)
+                scene.sceneryCaptureTiming->Observe(static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now()-sceneryStarted).count()));
         }
         // PAL113250 follows StuffScenery11321C and precedes the sun and
         // active camera mover. NIS actors retain their actual replay poses.
@@ -3306,7 +3439,8 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         // already contain world positions and the authored material texture.
         if(i<4 && simulation && simulation->world) {
             std::vector<SkidRenderQuad> skidQuads;
-            WorldClans(*simulation->world).PrepareRender(view.matrices.worldToClip,view,skidQuads,scene.advancePresentation);
+            WorldClans(*simulation->world).PrepareRender(view.matrices.worldToClip,view,skidQuads,
+                scene.advancePresentation,scene.emitRaceGeometry);
             for(const auto& quad:skidQuads) {
                 frontend::FlailerPoly polygon;polygon.rasterState=quad.rasterState;
                 for(std::size_t vertex=0;vertex<quad.vertices.size();++vertex) {
@@ -3327,11 +3461,11 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         // PAL11334C: the original WorldObject list follows scenery on the
         // primary views1..3 and precedes RenderFlailerModels. Fern shakers
         // hide their authored static placement while this very model lives.
-        if(i<4 && simulation && simulation->world)
+        if(scene.emitRaceGeometry && i<4 && simulation && simulation->world)
             (void)RenderWorldObjects(WorldObjects(*simulation->world),view,frame,
                 scene.clock->worldTimeFrames);
         // PAL11335C follows world objects with the authored light-flare pack.
-        if(i<4 && scene.track && scene.flow)
+        if(scene.emitRaceGeometry && i<4 && scene.track && scene.flow)
             (void)RenderWorldLightFlares(scene.track->files.Registry().Lights(),
                 scene.track->files.Registry(),view,frame,scene.flow->inGameFlag!=0);
     }
@@ -3352,7 +3486,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     }
     // PAL113378/113388: separate FrameEffects and WorldEffects lists share
     // allocation pools, not live particles. Both borrow the retained catalogue.
-    if(scene.effects) {
+    if(scene.emitRaceGeometry && scene.effects) {
         auto& catalogue=resources->Effects();
         for(std::size_t i=1;i<4;++i)if(active(views.screens[i])) {
             ecstasyViewSetCurrent(&views,&views.screens[i]);
@@ -3368,6 +3502,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     if(scene.environmentMap && scene.environmentMap->enabled && scene.flow && scene.flow->inGameFlag &&
         active(frontend))scene.environmentMap->CreatePrimitives(frame);
     frame.AttachSolidPolys(); // PAL1135B8: remap solid chain only.
+    const auto carCaptureStarted=std::chrono::steady_clock::now();
     if(simulation && simulation->world)for(std::size_t i=1;i<4;++i) {
         auto& view=views.screens[i];if(!active(view))continue;
         ecstasyViewSetCurrent(&views,&view);
@@ -3376,8 +3511,11 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         Require(scene.track->Session(),"Car damage display has no canonical RaceCoordinator");
         const CarDamageDisplayBindings display{scene.track->files.Registry(),*scene.parameters,
             scene.track->Session()->state,*scene.track->Players(),simulation->pursuit,view,frame};
-        RenderCars(*simulation->world,view,frame,*scene.clock,views.presentationLayout,&display,scene.track->ViewMovers());
+        RenderCars(*simulation->world,view,frame,*scene.clock,views.presentationLayout,&display,scene.track->ViewMovers(),scene.emitRaceGeometry);
     }
+    if(scene.carCaptureMilliseconds && simulation && simulation->world)
+        *scene.carCaptureMilliseconds+=std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now()-carCaptureStarted).count();
     // PAL1136BC/1136D4: reflected frontend cars, then the transparent
     // normal pass, after the ordinary race-car pass on views1..3.
     for(std::size_t i=1;i<4;++i)if(active(views.screens[i])) {
@@ -3401,7 +3539,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         RenderDashboards(views.screens[i],frame,scene.clock->worldTimeFrames);
     }
     frame.AttachSolidPolys();frame.AttachAlphaPolys();
-    if(scene.flow && scene.flow->inGameFlag) {
+    if(scene.emitRaceGeometry && scene.flow && scene.flow->inGameFlag) {
         frame.AttachFog(views);
         frame.AttachDepthOfField(views);
     }
@@ -3497,8 +3635,10 @@ void EcstasyFrame::BeginNextFrame()
     Require(commands_.empty() && pendingAlphaCommands_.empty() && orderingScratch_.empty() &&
         visibleScratch_.empty() && modelStripScratch_.empty() && modelTextureScratch_.empty() && depthTransfers_.empty() &&
         retainedStrips_.empty() && worldPolygons_.empty() && worldStrips_.empty() &&
-        animatedStrips_.empty() && liveParticleGroups_==0 && !textureAnimationResources_,
+        animatedStrips_.empty() && liveParticleGroups_==0 && !textureAnimationResources_ &&
+        liveInstances_==0 && liveProjections_==0 && !lastProjection_,
         "Completed graphics frame still owns a submitted borrower");
+    reusedOpaqueSceneryStrips_=0;carShadowCaptureMilliseconds_={};
     zWriteEnabled_=true;dashboardProjection_=false;inGameMaterials_=false;pendingAlphaBegin_=0;nextAlphaGroup_=0;nextFeedbackGroup_=0;
     displayTranslation_={};sourceDisplayExtent_={};textureTime_=0;
     environment_=nullptr;frontendEnvironmentTexture_=nullptr;specularFalloffTexture_=nullptr;
@@ -3521,6 +3661,7 @@ void EcstasyFrame::Release() noexcept
     animatedStrips_.clear();
     for (auto* strip:retainedStrips_)strip->pool->Complete(*strip);
     retainedStrips_.clear();
+    liveInstances_=0;liveProjections_=0;lastProjection_=nullptr;
 }
 std::vector<std::uint8_t> DecodeTextureMipRgba(const TextureInfo& texture,
     std::uint32_t level,std::size_t sourceOffset,std::size_t sourceBytes,
@@ -3657,15 +3798,21 @@ void graphicsNotifyPresentationComplete() noexcept {
 #endif
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <windows.h>
+#elif defined(__SWITCH__)
+#define VK_USE_PLATFORM_VI_NN
 #endif
 #include <vulkan/vulkan.h>
 #include <chrono>
+#include <deque>
+#include <future>
+#include <fstream>
 #include <algorithm>
 #include <limits>
 #include <map>
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace hp2 {
 namespace {
@@ -5562,8 +5709,8 @@ class VkNativeFrameShading {
                 std::memcmp(scroll.data(),job.scroll.data(),sizeof(scroll)) ||
                 std::memcmp(unit.data(),eUnitVector4,sizeof(unit)))return false;
             if(!(job.reflection || (draw.drawFlags&0xc0u)))return true;
-            if(material!=draw.lightMaterial || !draw.lightMaterial || !draw.lightContext)return false;
-            const auto& light=*draw.lightContext;
+            if(material!=draw.lightMaterial || !draw.lightMaterial || !draw.LightContext())return false;
+            const auto& light=*draw.LightContext();
             return std::memcmp(coefficients.data(),draw.lightMaterial->NativeCoefficients(),sizeof(coefficients))==0 &&
                 std::memcmp(context.colorMatrix.data(),light.colorMatrix.data(),sizeof(context.colorMatrix))==0 &&
                 std::memcmp(context.directionMatrix.data(),light.directionMatrix.data(),sizeof(context.directionMatrix))==0 &&
@@ -5575,7 +5722,7 @@ class VkNativeFrameShading {
             flags=draw.drawFlags;mode=requestedMode;alpha=draw.alphaScale;
             scroll=job.scroll;std::copy_n(eUnitVector4,unit.size(),unit.begin());index=first;
             if(job.reflection || (draw.drawFlags&0xc0u)) {
-                material=draw.lightMaterial;context=*draw.lightContext;
+                material=draw.lightMaterial;context=*draw.LightContext();
                 std::copy_n(draw.lightMaterial->NativeCoefficients(),coefficients.size(),coefficients.begin());
             } else material=nullptr;
             valid=true;
@@ -5595,7 +5742,7 @@ public:
     std::uint32_t Capture(const VkSolidStripJob& job,std::vector<std::array<float,4>>& data) {
         const auto& draw=*job.draw;
         const auto mode=(job.reflection ? 1u:0u)|(job.targetSample ? 2u:0u);
-        // The sealed commands contain value copies of their light context.
+        // Commands refer to immutable frame-owned lighting snapshots.
         // Compare the consumed source bits before rebuilding the same record
         // for every strip. Snapshots also detect changes when a diagnostic
         // caller reuses the same draw object. Nothing survives Clear().
@@ -5616,8 +5763,8 @@ public:
         for(std::size_t axis=0;axis<4;++axis) {finite(eUnitVector4[axis]);record[2][axis]=eUnitVector4[axis];}
         std::uint32_t materialIndex=0;
         if(job.reflection || (draw.drawFlags&0xc0u)) {
-            Require(draw.lightContext && draw.lightMaterial,"Native GPU shading lost its immutable inputs");
-            const auto& context=*draw.lightContext;
+            Require(draw.LightContext() && draw.lightMaterial,"Native GPU shading lost its immutable inputs");
+            const auto& context=*draw.LightContext();
             materialIndex=Material(*draw.lightMaterial,data);
             record[3]=context.localEye;
             for(std::size_t column=0;column<4;++column) {
@@ -5673,9 +5820,9 @@ private:
         hash=(hash>>4)^(hash>>20)^draw.drawFlags^(static_cast<std::uint64_t>(mode)<<16);
         hash=(hash^bits(draw.alphaScale))*1099511628211ull;
         hash=(hash^bits(job.scroll[0]))*1099511628211ull;
-        if((job.reflection || (draw.drawFlags&0xc0u)) && draw.lightContext) {
-            hash=(hash^bits(draw.lightContext->localEye[0]))*1099511628211ull;
-            hash=(hash^bits(draw.lightContext->localEye[2]))*1099511628211ull;
+        if((job.reflection || (draw.drawFlags&0xc0u)) && draw.LightContext()) {
+            hash=(hash^bits(draw.LightContext()->localEye[0]))*1099511628211ull;
+            hash=(hash^bits(draw.LightContext()->localEye[2]))*1099511628211ull;
         }
         return static_cast<std::size_t>(hash^(hash>>32))&(inputs_.size()-1);
     }
@@ -5732,7 +5879,7 @@ private:
 
 struct VkResidentGeometrySource {
     const EditorMarkerSolidGeometry::Strip* token{};
-    std::uint64_t validatedGather{},generation{},queuedValidationGather{};
+    std::uint64_t validatedGather{},generation{},queuedValidationGather{},vertexRevision{};
     std::size_t queuedValidation{};
     std::size_t count{},normalCount{},uniqueCount{},triangleCount{},topologyCount{};
     std::uint64_t disableMask{},topologyMask{};
@@ -5839,7 +5986,7 @@ public:
             if(draw.kind!=EcstasyDrawKind::SolidStrip && draw.kind!=EcstasyDrawKind::SolidReflectionStrip &&
                 draw.kind!=EcstasyDrawKind::SolidSpecularStrip)continue;
             const auto* token=draw.strip;
-            if(!token)continue;
+            if(!token || token->nativeVertexRevision)continue;
             // Malformed or cropped-out commands keep their existing Gather
             // validation point. Do not add a failure for a draw that would
             // never reach Acquire after its authored scissor is applied.
@@ -5885,10 +6032,13 @@ public:
         }
         auto& source=*resolved;
         if(source.validatedGather!=gather_) {
+            const auto revision=token->nativeVertexRevision;
             const bool compared=validationsReady_ && source.queuedValidationGather==gather_;
-            const bool matches=compared ? validations_[source.queuedValidation].matches:
-                source.generation && source.Matches(*token);
+            const bool sameRevision=revision!=0 && revision==source.vertexRevision;
+            const bool matches=sameRevision || (compared ? validations_[source.queuedValidation].matches:
+                source.generation && source.Matches(*token));
             if(!matches)source.Capture(*token);
+            source.vertexRevision=revision;
             // Publication stays at the original first used strip. A
             // completed comparison alone never marks source bytes valid.
             source.validatedGather=gather_;
@@ -6164,7 +6314,13 @@ VkNativeTextureKey NativeTextureKey(const TextureInfo& texture,bool forcedClamp)
 void CollectNativeTextureReferences(std::vector<VkNativeTextureKey>& referenced,
     const std::vector<EcstasyDrawCommand>& commands)
 {
+    std::array<std::byte,32768> localStorage;
+    std::pmr::monotonic_buffer_resource scratch(localStorage.data(),localStorage.size());
+    std::pmr::unordered_set<VkNativeTextureKey,VkNativeTextureKeyHash> seen{&scratch};
+    if(!referenced.empty())seen.reserve(referenced.size());
     referenced.clear();
+    const TextureInfo* lastTexture=nullptr;
+    bool lastClamp=false;
     for(const auto& draw:commands) {
         if(draw.kind==EcstasyDrawKind::FogPass || draw.kind==EcstasyDrawKind::FocusMaskPass ||
             draw.kind==EcstasyDrawKind::DepthOfFieldPass || draw.kind==EcstasyDrawKind::BlackAndWhitePass)continue;
@@ -6172,10 +6328,13 @@ void CollectNativeTextureReferences(std::vector<VkNativeTextureKey>& referenced,
             Require(!draw.texture,"Target-sampled draw has conflicting image owners");continue;
         }
         Require(draw.texture,"Vulkan draw lost its actual texture");
-        referenced.push_back(NativeTextureKey(*draw.texture,NativeDrawClampsTexture(draw)));
+        const bool forcedClamp=NativeDrawClampsTexture(draw);
+        if(draw.texture==lastTexture && forcedClamp==lastClamp)continue;
+        lastTexture=draw.texture;lastClamp=forcedClamp;
+        const auto key=NativeTextureKey(*draw.texture,forcedClamp);
+        if(seen.insert(key).second)referenced.push_back(key);
     }
     std::sort(referenced.begin(),referenced.end());
-    referenced.erase(std::unique(referenced.begin(),referenced.end()),referenced.end());
 }
 // CPU scratch for one sealed frame only. Collection stays at its original
 // first-use point, preserving preflight short-circuit/error/fence ordering.
@@ -6202,6 +6361,16 @@ bool NativeTextureReferenced(const std::vector<VkNativeTextureKey>& referenced,V
 {return std::binary_search(referenced.begin(),referenced.end(),key);}
 
 struct VkDrawTexture {
+    struct OpaqueSceneryState {
+        std::uint32_t blend{};
+        float blendConstant{},lodScale{};
+        std::int32_t textureFunction{},minification{};
+        bool depthWrite{},fullAlpha{};
+        bool valid{};
+        // Wireframe, texturing, clamp, depth-write and alpha-test variants.
+        // Pipelines remain owned by Storage::pipelines.
+        std::array<VkPipeline,32> pipelines{};
+    } scenery;
     VkNativeImage image;VkSampler sampler{},magnifiedSampler{},uiSampler{};VkDescriptorSet descriptor{};
     std::uint32_t width{},height{},levels{};
     // Identity is only an associative token. It is never dereferenced after
@@ -6222,6 +6391,7 @@ struct VkDrawTexture {
     std::size_t sourcePixelOffset{},sourcePaletteOffset{};
     bool hasPaletteOwner{},sourcePaletteLinear{};
     std::uint64_t lastReferencedFrame{};
+    std::uint64_t generation{};
     std::uint64_t validatedGather{};
     bool uploadCompleted{};
     bool OwnersAlive() const noexcept
@@ -6261,8 +6431,28 @@ struct VkDrawTexture {
             (sourcePalette.empty() || sameBytes(texture.palette,paletteOwner,sourcePaletteOffset,sourcePalette));
     }
 };
+VkDrawTexture::OpaqueSceneryState& ResolveOpaqueSceneryMaterial(
+    VkDrawTexture& texture,const std::uint8_t* wire,EcstasyTextureFilter filter)
+{
+    auto& material=texture.scenery;
+    if(!material.valid) {
+        const auto alpha=wire[0x76];
+        material.blend=(alpha&3u)|(((alpha>>2)&3u)<<8)|
+            (((alpha>>4)&3u)<<16)|(((alpha>>6)&3u)<<24);
+        material.blendConstant=static_cast<float>(wire[0x77])/128.0f;
+        material.lodScale=static_cast<float>(1u<<wire[0x71]);
+        material.textureFunction=wire[0x4e];
+        material.minification=filter==EcstasyTextureFilter::Authored?wire[0x70]:-2;
+        material.depthWrite=wire[0x50]!=0;
+        material.fullAlpha=wire[0x4f]!=0;
+        material.valid=true;
+    }
+    return material;
+}
+
 struct VkDrawTarget {
     VkNativeImage color,depth,previous;
+    VkImageView reflectionSampleView{},previousReflectionSampleView{};
     // Current-stage snapshot, never aliases previous-frame history.
     VkNativeImage feedback;
     VkDescriptorPool feedbackPool{};
@@ -6279,6 +6469,7 @@ struct VkDrawTarget {
 struct VkDrawBatch {
     std::uint32_t first{},count{};
     bool indexed{};
+    bool cachedOpaqueScenery{};
     bool residentGeometry{};
     bool residentIndices{};
     std::uint32_t nativeSpanFirst{},nativeSpanCount{};
@@ -6344,6 +6535,40 @@ struct VkDrawBatch {
         // raster/material/resource/pass state and original order stay intact.
         return indexed && nativeIndirectTransform && previous.nativeIndirectTransform && SameDrawState(previous);
     }
+};
+
+class VkSceneryPacketCache {
+    struct Entry {
+        std::uint64_t indexToken{},geometryGeneration{},textureGeneration{};
+        VkResidentGeometryKey geometryKey;
+        std::uint32_t flags{};
+        VkDrawBatch batch;
+        bool Matches(const VkResidentGeometryEntry& resident,std::uint64_t texture,
+            std::uint32_t state) const noexcept {
+            return indexToken && indexToken==resident.indexToken &&
+                geometryGeneration==resident.sourceGeneration && geometryKey==resident.key &&
+                textureGeneration==texture && flags==state;
+        }
+    };
+public:
+    void Configure(std::size_t count) {entries_.resize(count);}
+    const VkDrawBatch* Find(const VkResidentGeometryEntry& resident,
+        std::uint64_t texture,std::uint32_t flags) const noexcept {
+        const auto& entry=entries_[resident.slot];
+        return entry.Matches(resident,texture,flags) ? &entry.batch:nullptr;
+    }
+    void Store(const VkResidentGeometryEntry& resident,std::uint64_t texture,
+        std::uint32_t flags,const VkDrawBatch& batch) noexcept {
+        auto& entry=entries_[resident.slot];
+        entry.batch=batch;
+        entry.geometryKey=resident.key;entry.indexToken=resident.indexToken;
+        entry.geometryGeneration=resident.sourceGeneration;
+        entry.textureGeneration=texture;entry.flags=flags;
+    }
+private:
+    // One packet per bounded resident slot avoids conflicts in large scenes.
+    // This cache owns no texture, source geometry, Vulkan handle or resource lifetime.
+    std::vector<Entry> entries_;
 };
 
 struct VkFogDepthPlan {
@@ -6417,6 +6642,11 @@ struct EcstasyVulkanDevice::Storage {
     VkQueue queue{};
     std::uint32_t queueFamily{},timestampValidBits{};
     VkQueryPool timestampQueries{};
+    // One setup boundary and one completion boundary for each target slot,
+    // in addition to the two full-frame timestamp queries.
+    static constexpr std::uint32_t TimestampQueryCapacity=18;
+    std::array<std::int32_t,TimestampQueryCapacity> timestampTargetIds{};
+    std::uint32_t submittedTimestampCount{2};
     std::uint64_t nextSubmission{},querySubmission{};
     EcstasyVulkanFrameStatistics statistics;
     VkSurfaceKHR surface{};
@@ -6463,6 +6693,8 @@ struct EcstasyVulkanDevice::Storage {
     VkNativeBuffer residentIndices,residentIndexStaging;
     VkResidentGeometryCache residentGeometry;
     VkResidentIndexCache residentIndexCache;
+    VkSceneryPacketCache sceneryPackets;
+    std::uint64_t nextTextureGeneration{};
     std::vector<const VkResidentGeometryEntry*> gatheredResidentIndexSpans;
     std::vector<VkResidentIndexEntry*> residentIndexPendingUploads;
     std::vector<VkBufferCopy> residentIndexCopies;
@@ -6480,7 +6712,16 @@ struct EcstasyVulkanDevice::Storage {
     VkPipelineLayout pipelineLayout{};
     VkPipelineCache pipelineCache{};
     VkShaderModule vertexShader{},fragmentShader{};
-    std::map<std::tuple<std::uint32_t,bool,bool,bool,bool,bool,std::int32_t,std::int32_t,std::int32_t,bool,bool,bool,bool>,VkPipeline> pipelines;
+    using PipelineKey=std::tuple<std::uint32_t,bool,bool,bool,bool,bool,std::int32_t,std::int32_t,std::int32_t,bool,bool,bool,bool>;
+    std::map<PipelineKey,VkPipeline> pipelines;
+    PipelineKey lastPipelineKey{};
+    VkPipeline lastPipeline{};
+    std::map<PipelineKey,std::future<VkPipeline>> pendingPipelines;
+    std::mutex pipelineMutex;
+    std::condition_variable pipelineWake;
+    std::deque<std::packaged_task<VkPipeline()>> pipelineJobs;
+    std::thread pipelineWorker;
+    bool stopPipelineWorker{};
     std::vector<VkDrawTexture> textures;
     std::unordered_map<VkNativeTextureKey,std::size_t,VkNativeTextureKeyHash> textureIndices;
     std::vector<VkNativeTextureKey> referencedTextures;
@@ -6863,18 +7104,40 @@ struct EcstasyVulkanDevice::Storage {
     void PublishGpuTime()
     {
         if(!timestampQueries || !querySubmission)return;
-        std::uint64_t ticks[2]{};
+        std::array<std::uint64_t,TimestampQueryCapacity> ticks{};
         // This path follows the already-required submission fence. Never add
         // WAIT_BIT or stall a current GPU frame merely to obtain diagnostics.
-        const auto result=vkGetQueryPoolResults(device,timestampQueries,0,2,sizeof(ticks),ticks,
-            sizeof(ticks[0]),VK_QUERY_RESULT_64_BIT);
+        const auto result=vkGetQueryPoolResults(device,timestampQueries,0,submittedTimestampCount,
+            sizeof(ticks),ticks.data(),sizeof(ticks[0]),VK_QUERY_RESULT_64_BIT);
         if(result==VK_NOT_READY)return;
         vkRequired(result,"vkGetQueryPoolResults(completed frame)");
         const auto mask=timestampValidBits==64 ? UINT64_MAX:(std::uint64_t{1}<<timestampValidBits)-1u;
         const auto elapsed=(ticks[1]-ticks[0])&mask;
-        statistics.gpuMilliseconds=static_cast<double>(elapsed)*properties.limits.timestampPeriod/1000000.0;
+        const auto milliseconds=[&](std::uint64_t delta) {
+            return static_cast<double>(delta)*properties.limits.timestampPeriod/1000000.0;
+        };
+        statistics.gpuMilliseconds=milliseconds(elapsed);
         statistics.completedGpuFrame=querySubmission;
         statistics.gpuTimeAvailable=elapsed!=0 && std::isfinite(statistics.gpuMilliseconds);
+        auto& profile=statistics.gpuProfile;
+        profile={};
+        if(statistics.gpuTimeAvailable && submittedTimestampCount>2) {
+            auto previous=(ticks[2]-ticks[0])&mask;
+            if(previous>elapsed)return;
+            profile.setupMilliseconds=milliseconds(previous);
+            for(std::uint32_t query=3;query<submittedTimestampCount;++query) {
+                const auto finish=(ticks[query]-ticks[0])&mask;
+                if(finish<previous || finish>elapsed)return;
+                const auto span=milliseconds(finish-previous);
+                const auto id=timestampTargetIds[query];
+                if(id==0)profile.mainMilliseconds+=span;
+                else if(id==7)profile.mirrorMilliseconds+=span;
+                else profile.auxMilliseconds+=span;
+                previous=finish;
+            }
+            profile.tailMilliseconds=milliseconds(elapsed-previous);
+            profile.available=true;
+        }
     }
     bool RetireUnusedTextures(const VkNativeFrameTextureReferences& frameTextures)
     {
@@ -6924,6 +7187,8 @@ struct EcstasyVulkanDevice::Storage {
         if(target.descriptorPool)vkDestroyDescriptorPool(device,target.descriptorPool,nullptr);
         if(target.sampler)vkDestroySampler(device,target.sampler,nullptr);
         if(target.magnifiedSampler)vkDestroySampler(device,target.magnifiedSampler,nullptr);
+        if(target.reflectionSampleView)vkDestroyImageView(device,target.reflectionSampleView,nullptr);
+        if(target.previousReflectionSampleView)vkDestroyImageView(device,target.previousReflectionSampleView,nullptr);
         Destroy(target.color);Destroy(target.depth);Destroy(target.previous);Destroy(target.feedback);target={};
     }
     void CreateSampledTarget(std::int32_t id,std::uint32_t width,std::uint32_t height);
@@ -6933,7 +7198,7 @@ struct EcstasyVulkanDevice::Storage {
     void SetFogDepthReadable(bool readable);
     void CopyFogDepth();
     void CreateFocusTargets();
-    void BlurFocus(const VkDrawBatch& batch);
+    void BlurFocus(const VkDrawBatch& batch,VkPipeline pipeline);
     void CopyHistory(std::int32_t id,VkImage current,bool readableLayout);
     void CreateFeedback(std::int32_t id,const VkDrawTexture* source);
     void CopyFeedback(std::int32_t id);
@@ -6966,6 +7231,7 @@ struct EcstasyVulkanDevice::Storage {
     }
     void Close() noexcept
     {
+        StopPipelineWorker();
         if (device) {
             (void)vkDeviceWaitIdle(device);
             ClearFrameAllocations();
@@ -6977,8 +7243,11 @@ struct EcstasyVulkanDevice::Storage {
             for(auto& texture:textures)Destroy(texture);
             textures.clear();CloseTargets();
             for (const auto& pipeline:pipelines)vkDestroyPipeline(device,pipeline.second,nullptr);
-            pipelines.clear();
-            if(pipelineCache)vkDestroyPipelineCache(device,pipelineCache,nullptr);
+            pipelines.clear();lastPipeline=VK_NULL_HANDLE;
+            if(pipelineCache) {
+                SavePipelineCache();
+                vkDestroyPipelineCache(device,pipelineCache,nullptr);
+            }
             if(timestampQueries)vkDestroyQueryPool(device,timestampQueries,nullptr);
             if(vertexShader)vkDestroyShaderModule(device,vertexShader,nullptr);
             if(fragmentShader)vkDestroyShaderModule(device,fragmentShader,nullptr);
@@ -7010,6 +7279,11 @@ struct EcstasyVulkanDevice::Storage {
     void Initialize();
     void CreateTargets();
     VkPipeline Pipeline(const VkDrawBatch& batch,bool samplingDepth=false);
+    VkPipeline CompilePipeline(const VkDrawBatch& batch,bool samplingDepth,bool multisampled,
+        std::int32_t materialMinification);
+    void RunPipelineWorker();
+    void StopPipelineWorker() noexcept;
+    void SavePipelineCache() noexcept;
     void UploadTexture(const TextureInfo& texture,std::size_t index,bool repeatedPadding);
     // Reused across frames. Input commands belong to the sealed source frame;
     // workers only read that frame and write disjoint completed vertex slots.
@@ -7050,6 +7324,8 @@ void EcstasyVulkanDevice::Storage::Initialize()
 #ifdef _WIN32
         Require(options.nativeInstance,"A Win32 Vulkan surface requires its real HINSTANCE");
         extensions={VK_KHR_SURFACE_EXTENSION_NAME,VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+#elif defined(__SWITCH__)
+        extensions={VK_KHR_SURFACE_EXTENSION_NAME,VK_NN_VI_SURFACE_EXTENSION_NAME};
 #else
         throw std::runtime_error("This Vulkan build has no native window surface for this platform");
 #endif
@@ -7067,6 +7343,16 @@ void EcstasyVulkanDevice::Storage::Initialize()
         createSurface.hinstance=static_cast<HINSTANCE>(options.nativeInstance);
         createSurface.hwnd=static_cast<HWND>(options.nativeWindow);
         vkRequired(vkCreateWin32SurfaceKHR(instance,&createSurface,nullptr,&surface),"vkCreateWin32SurfaceKHR");
+    }
+#elif defined(__SWITCH__)
+    if(options.nativeWindow) {
+        const auto createViSurface=reinterpret_cast<PFN_vkCreateViSurfaceNN>(
+            vkGetInstanceProcAddr(instance,"vkCreateViSurfaceNN"));
+        Require(createViSurface,"Vulkan driver does not expose vkCreateViSurfaceNN");
+        VkViSurfaceCreateInfoNN createSurface{};
+        createSurface.sType=VK_STRUCTURE_TYPE_VI_SURFACE_CREATE_INFO_NN;
+        createSurface.window=options.nativeWindow;
+        vkRequired(createViSurface(instance,&createSurface,nullptr,&surface),"vkCreateViSurfaceNN");
     }
 #endif
     std::uint32_t count{};vkRequired(vkEnumeratePhysicalDevices(instance,&count,nullptr),"vkEnumeratePhysicalDevices");
@@ -7101,6 +7387,7 @@ void EcstasyVulkanDevice::Storage::Initialize()
             geometryHeap=std::max(geometryHeap,memoryProperties.memoryHeaps[heap].size);
     const auto geometryBudget=std::min<VkDeviceSize>(64u*1024u*1024u,geometryHeap/64u);
     residentGeometry.Configure(static_cast<std::size_t>(geometryBudget/VkResidentGeometryCache::SlotBytes));
+    sceneryPackets.Configure(residentGeometry.Capacity());
     // Index ranges are cached per already merged draw, not per-strip draws.
     // Their GPU budget and retained CPU payloads are independently bounded.
     residentIndexCache.Configure(static_cast<std::uint32_t>((geometryBudget/4)/sizeof(std::uint32_t)));
@@ -7200,10 +7487,35 @@ void EcstasyVulkanDevice::Storage::Initialize()
     deviceCreate.ppEnabledExtensionNames=deviceExtensions.data();
     vkRequired(vkCreateDevice(physical,&deviceCreate,nullptr,&device),"vkCreateDevice");vkGetDeviceQueue(device,queueFamily,0,&queue);
     VkPipelineCacheCreateInfo cacheCreate{};cacheCreate.sType=VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-    vkRequired(vkCreatePipelineCache(device,&cacheCreate,nullptr,&pipelineCache),"vkCreatePipelineCache");
+    std::vector<char> cacheData;
+    if(!options.pipelineCachePath.empty()) {
+        std::ifstream cache(options.pipelineCachePath,std::ios::binary|std::ios::ate);
+        const auto bytes=cache.tellg();
+        if(bytes>=32 && bytes<=16*1024*1024) {
+            cacheData.resize(static_cast<std::size_t>(bytes));
+            cache.seekg(0);
+            if(cache.read(cacheData.data(),static_cast<std::streamsize>(cacheData.size()))) {
+                std::array<std::uint32_t,4> header{};
+                std::memcpy(header.data(),cacheData.data(),sizeof(header));
+                if(header[0]>=32 && header[0]<=cacheData.size() &&
+                   header[1]==VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
+                   header[2]==properties.vendorID && header[3]==properties.deviceID &&
+                   !std::memcmp(cacheData.data()+sizeof(header),properties.pipelineCacheUUID,VK_UUID_SIZE)) {
+                    cacheCreate.initialDataSize=cacheData.size();
+                    cacheCreate.pInitialData=cacheData.data();
+                }
+            }
+        }
+    }
+    if(!cacheCreate.initialDataSize ||
+        vkCreatePipelineCache(device,&cacheCreate,nullptr,&pipelineCache)!=VK_SUCCESS) {
+        cacheCreate.initialDataSize=0;
+        cacheCreate.pInitialData=nullptr;
+        vkRequired(vkCreatePipelineCache(device,&cacheCreate,nullptr,&pipelineCache),"vkCreatePipelineCache");
+    }
     if(timestampValidBits && timestampValidBits<=64 && properties.limits.timestampPeriod>0.0f) {
         VkQueryPoolCreateInfo queries{};queries.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-        queries.queryType=VK_QUERY_TYPE_TIMESTAMP;queries.queryCount=2;
+        queries.queryType=VK_QUERY_TYPE_TIMESTAMP;queries.queryCount=TimestampQueryCapacity;
         vkRequired(vkCreateQueryPool(device,&queries,nullptr,&timestampQueries),"vkCreateQueryPool(timestamps)");
     }
 
@@ -7545,6 +7857,18 @@ void EcstasyVulkanDevice::Storage::CreateSampledTarget(std::int32_t id,std::uint
         // No stale image is copied into an authored TextureInfo resource.
         if(id==0 || id==14)CreateImage(target.previous,width,height,VK_FORMAT_R8G8B8A8_UNORM,
             VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_COLOR_BIT);
+        if(id==14) {
+            // PAL106E9C/1086E8: mapped environment samples have opaque
+            // framebuffer alpha. Sampling views preserve the original RGB.
+            VkImageViewCreateInfo view{};view.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            view.viewType=VK_IMAGE_VIEW_TYPE_2D;view.format=VK_FORMAT_R8G8B8A8_UNORM;
+            view.components.a=VK_COMPONENT_SWIZZLE_ONE;
+            view.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+            view.image=target.color.image;
+            vkRequired(vkCreateImageView(device,&view,nullptr,&target.reflectionSampleView),"vkCreateImageView(environment sample)");
+            view.image=target.previous.image;
+            vkRequired(vkCreateImageView(device,&view,nullptr,&target.previousReflectionSampleView),"vkCreateImageView(environment history sample)");
+        }
         VkSamplerCreateInfo sampler{};sampler.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
         // UpdateGifTags105F4C/54/68/74: generated target mag1,min2,TFX0.
         sampler.magFilter=sampler.minFilter=options.textureFilter==EcstasyTextureFilter::Authored ? VK_FILTER_NEAREST:VK_FILTER_LINEAR;
@@ -7558,14 +7882,14 @@ void EcstasyVulkanDevice::Storage::CreateSampledTarget(std::int32_t id,std::uint
         VkDescriptorPoolCreateInfo pool{};pool.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         pool.maxSets=2;pool.poolSizeCount=1;pool.pPoolSizes=&size;
         vkRequired(vkCreateDescriptorPool(device,&pool,nullptr,&target.descriptorPool),"vkCreateDescriptorPool(original target)");
-        const auto descriptor=[&](VkNativeImage& image,VkDescriptorSet& output) {
-            if(!image.image)return;
+        const auto descriptor=[&](VkImageView image,VkDescriptorSet& output) {
+            if(!image)return;
             VkDescriptorSetAllocateInfo allocation{};allocation.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
             allocation.descriptorPool=target.descriptorPool;allocation.descriptorSetCount=1;allocation.pSetLayouts=&descriptorLayout;
             vkRequired(vkAllocateDescriptorSets(device,&allocation,&output),"vkAllocateDescriptorSets(original target)");
-            const VkDescriptorImageInfo info[]={{target.sampler,image.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-                {target.magnifiedSampler,image.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-                {target.magnifiedSampler,image.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+            const VkDescriptorImageInfo info[]={{target.sampler,image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                {target.magnifiedSampler,image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                {target.magnifiedSampler,image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
             VkWriteDescriptorSet writes[3]{};
             for(std::uint32_t i=0;i<3;++i) {
                 auto& write=writes[i];write.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;write.dstSet=output;
@@ -7574,7 +7898,8 @@ void EcstasyVulkanDevice::Storage::CreateSampledTarget(std::int32_t id,std::uint
             }
             UpdateDescriptors(3,writes);
         };
-        descriptor(target.color,target.descriptor);descriptor(target.previous,target.previousDescriptor);
+        descriptor(target.reflectionSampleView ? target.reflectionSampleView:target.color.view,target.descriptor);
+        descriptor(target.previousReflectionSampleView ? target.previousReflectionSampleView:target.previous.view,target.previousDescriptor);
     }catch(...) {Destroy(target);renderedTargets.erase(id);throw;}
 }
 
@@ -7717,7 +8042,7 @@ void EcstasyVulkanDevice::Storage::CreateFocusTargets()
     }catch(...) {Destroy(focusBlur);Destroy(focusSource);throw;}
 }
 
-void EcstasyVulkanDevice::Storage::BlurFocus(const VkDrawBatch& batch)
+void EcstasyVulkanDevice::Storage::BlurFocus(const VkDrawBatch& batch,VkPipeline pipeline)
 {
     // The caller has ended the source pass, so color is its resolved,
     // transfer-readable image. The tap pass writes ONLY focusBlur, so its
@@ -7736,7 +8061,7 @@ void EcstasyVulkanDevice::Storage::BlurFocus(const VkDrawBatch& batch)
     tap.postProcess=true;
     tap.viewport={0,0,static_cast<float>(focusBlur.width),static_cast<float>(focusBlur.height),0,1};
     tap.scissor={{0,0},{focusBlur.width,focusBlur.height}};
-    vkCmdBindPipeline(commands,VK_PIPELINE_BIND_POINT_GRAPHICS,Pipeline(tap));
+    vkCmdBindPipeline(commands,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline);
     const VkDeviceSize vertexOffset=0;
     vkCmdBindVertexBuffers(commands,0,1,&vertices.buffer,&vertexOffset);
     vkCmdBindDescriptorSets(commands,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelineLayout,1,1,&frameDescriptor,0,nullptr);
@@ -7850,6 +8175,58 @@ void EcstasyVulkanDevice::Storage::CopyFeedback(std::int32_t id)
     target.feedbackInitialized=true;
 }
 
+void EcstasyVulkanDevice::Storage::SavePipelineCache() noexcept
+{
+    if(options.pipelineCachePath.empty())return;
+    try {
+        std::size_t bytes{};
+        if(vkGetPipelineCacheData(device,pipelineCache,&bytes,nullptr)!=VK_SUCCESS ||
+            bytes<32 || bytes>16*1024*1024)return;
+        std::vector<char> data(bytes);
+        if(vkGetPipelineCacheData(device,pipelineCache,&bytes,data.data())!=VK_SUCCESS)return;
+        std::ofstream cache(options.pipelineCachePath,std::ios::binary|std::ios::trunc);
+        cache.write(data.data(),static_cast<std::streamsize>(bytes));
+    } catch(...) {} // The driver cache is optional.
+}
+
+void EcstasyVulkanDevice::Storage::RunPipelineWorker()
+{
+    ConfigureNativeSceneWorker();
+#ifdef __SWITCH__
+    s32 priority{};
+    if(R_SUCCEEDED(svcGetThreadPriority(&priority,CUR_THREAD_HANDLE)))
+        (void)svcSetThreadPriority(CUR_THREAD_HANDLE,std::min(priority+4,63));
+#endif
+    for(;;) {
+        std::packaged_task<VkPipeline()> job;
+        {
+            std::unique_lock<std::mutex> lock(pipelineMutex);
+            pipelineWake.wait(lock,[this] {return stopPipelineWorker || !pipelineJobs.empty();});
+            if(stopPipelineWorker)return;
+            job=std::move(pipelineJobs.front());
+            pipelineJobs.pop_front();
+        }
+        job();
+    }
+}
+
+void EcstasyVulkanDevice::Storage::StopPipelineWorker() noexcept
+{
+    if(!pipelineWorker.joinable())return;
+    {
+        std::lock_guard<std::mutex> lock(pipelineMutex);
+        stopPipelineWorker=true;
+        pipelineJobs.clear();
+    }
+    pipelineWake.notify_one();
+    pipelineWorker.join();
+    for(auto& entry:pendingPipelines) {
+        try {vkDestroyPipeline(device,entry.second.get(),nullptr);}
+        catch(...) {} // Failed or cancelled jobs own no Vulkan handle.
+    }
+    pendingPipelines.clear();
+}
+
 VkPipeline EcstasyVulkanDevice::Storage::Pipeline(const VkDrawBatch& batch,bool samplingDepth)
 {
     Require(!samplingDepth || (!batch.target && !batch.depth && !batch.depthWrite && !batch.postProcess),
@@ -7862,7 +8239,40 @@ VkPipeline EcstasyVulkanDevice::Storage::Pipeline(const VkDrawBatch& batch,bool 
     const auto key=std::make_tuple(batch.blend,batch.depth,batch.depthWrite,batch.postProcess,multisampled,samplingDepth,
         batch.textureFunction,batch.alphaTest,materialMinification,batch.wireframe,batch.untextured,batch.clampTopLeft,
         batch.showcaseEnvironmentBlend);
-    const auto found=pipelines.find(key);if(found!=pipelines.end())return found->second;
+    if(lastPipeline && lastPipelineKey==key)return lastPipeline;
+    const auto found=pipelines.find(key);
+    if(found!=pipelines.end()) {lastPipelineKey=key;lastPipeline=found->second;return lastPipeline;}
+    VkPipeline result{};
+    if(options.asyncPipelines) {
+        const auto pending=pendingPipelines.find(key);
+        if(pending==pendingPipelines.end()) {
+            if(!pipelineWorker.joinable())
+                pipelineWorker=std::thread([this] {RunPipelineWorker();});
+            std::packaged_task<VkPipeline()> job([this,batch,samplingDepth,multisampled,materialMinification] {
+                return CompilePipeline(batch,samplingDepth,multisampled,materialMinification);
+            });
+            auto future=job.get_future();
+            pendingPipelines.emplace(key,std::move(future));
+            {
+                std::lock_guard<std::mutex> lock(pipelineMutex);
+                pipelineJobs.push_back(std::move(job));
+            }
+            pipelineWake.notify_one();
+        } else if(pending->second.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+            auto ready=std::move(pending->second);
+            pendingPipelines.erase(pending);
+            result=ready.get();
+        }
+        if(!result)return VK_NULL_HANDLE;
+    } else result=CompilePipeline(batch,samplingDepth,multisampled,materialMinification);
+    ++statistics.pipelineCreations;
+    try {pipelines.emplace(key,result);}catch (...) {vkDestroyPipeline(device,result,nullptr);throw;}
+    lastPipelineKey=key;lastPipeline=result;return result;
+}
+
+VkPipeline EcstasyVulkanDevice::Storage::CompilePipeline(const VkDrawBatch& batch,bool samplingDepth,
+    bool multisampled,std::int32_t materialMinification)
+{
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT;
     stages[0].module=vertexShader;stages[0].pName="main";
@@ -7951,9 +8361,9 @@ VkPipeline EcstasyVulkanDevice::Storage::Pipeline(const VkDrawBatch& batch,bool 
     pipeline.layout=pipelineLayout;pipeline.renderPass=samplingDepth ? depthSamplingRenderPass:batch.postProcess ? postProcessRenderPass:
         multisampled ? multisampleRenderPass:renderPass;pipeline.subpass=0;
     VkPipeline result{};
-    vkRequired(vkCreateGraphicsPipelines(device,pipelineCache,1,&pipeline,nullptr,&result),"vkCreateGraphicsPipelines");
-    ++statistics.pipelineCreations;
-    try {pipelines.emplace(key,result);}catch (...) {vkDestroyPipeline(device,result,nullptr);throw;}
+    const auto status=vkCreateGraphicsPipelines(device,pipelineCache,1,&pipeline,nullptr,&result);
+    if(status!=VK_SUCCESS && result)vkDestroyPipeline(device,result,nullptr);
+    vkRequired(status,"vkCreateGraphicsPipelines");
     return result;
 }
 
@@ -7979,7 +8389,12 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
         const auto bytes=baseBytes>>(2u*level);
         std::uint32_t levelWidth{},levelHeight{};
         auto rgba=DecodeTextureMipRgba(texture,level,sourceBytes,bytes,levelWidth,levelHeight,repeatedPadding);
-        if(!level) {width=levelWidth;height=levelHeight;}
+        if(!level) {
+            width=levelWidth;height=levelHeight;
+#ifdef __SWITCH__
+            nx::OverrideControllerTexture(texture.descriptor->key,width,height,rgba);
+#endif
+        }
         VkBufferImageCopy copy{};copy.bufferOffset=pixels.size();
         copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,level,0,1};copy.imageExtent={levelWidth,levelHeight,1};
         copies.push_back(copy);pixels.insert(pixels.end(),rgba.begin(),rgba.end());sourceBytes+=bytes;
@@ -8060,6 +8475,8 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
     std::copy_n(wire,target.sourceDescriptor.size(),target.sourceDescriptor.begin());
     target.CaptureOwners(texture);
     target.lastReferencedFrame=completedFrameSerial;
+    Require(nextTextureGeneration!=UINT64_MAX,"Native texture generation exhausted");
+    target.generation=++nextTextureGeneration;
 
 }
 
@@ -8087,8 +8504,16 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     residentGeometry.Begin(gatherSerial);residentIndexCache.Begin(gatherSerial);
     residentFrameVertices=0;residentFrameIndices=0;gatheredResidentIndexSpans.clear();
     nativeStripJobs.clear();nativeWorkRanges.clear();nativeFrameShading.Clear();
+    using Clock=std::chrono::steady_clock;
+    auto& profile=statistics.renderProfile;
+    profile.shadowStrips={};profile.shadowTriangles={};
+    const bool sampleShadowGather=nextSubmission%16u==0;
+    profile.shadowGatherSamples=sampleShadowGather ? 1u:0u;
+    profile.shadowGatherMilliseconds={};
     const auto nativeWorkers=NativeSceneEffectiveHardwareConcurrency();
+    const auto validateStarted=Clock::now();
     residentGeometry.ValidateSources(frame.Commands(),nativeWorkers);
+    profile.gatherValidationMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-validateStarted).count();
     const bool directSourcePreparation=nativeWorkers<=1;
     std::size_t nativePendingWork=0;
     // Cold raw uploads use the shared native pool after ordered state
@@ -8150,7 +8575,186 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         resolved.indices[context]=found->second;resolved.contexts|=mask;
         return found->second;
     };
+    // Logical targets can share one physical attachment. Use the original
+    // source identity and keep the raster cache local to this Gather.
+    struct TargetRaster {
+        const EcstasyRenderTarget* source{};
+        VkViewport originalViewport{},viewport{};
+        VkRect2D scissor{};
+        float displayWidth{},displayHeight{};
+        std::uint32_t outputWidth{},outputHeight{};
+        std::array<double,2> translation{},clipScale{{1.0,1.0}},clipOffset{};
+    };
+    std::array<TargetRaster,15> targetRasters{};
+    const auto rasterFor=[&](const EcstasyRenderTarget& target,std::int32_t destination) -> const TargetRaster& {
+        auto& raster=targetRasters[static_cast<std::size_t>(target.id)];
+        if(raster.source==&target)return raster;
+        raster={};
+        raster.source=&target;
+        auto& viewport=raster.viewport;
+        // Source targets are authored in the original display coordinates;
+        // viewport scaling maps them to the selected native output resolution.
+        raster.displayWidth=static_cast<float>(target.width);
+        raster.displayHeight=static_cast<float>(target.height);
+        const auto* attachment=destination ? &renderedTargets.at(destination):nullptr;
+        raster.outputWidth=attachment ? attachment->width:options.width;
+        raster.outputHeight=attachment ? attachment->height:options.height;
+        const auto outputWidth=raster.outputWidth,outputHeight=raster.outputHeight;
+        // Offscreen attachments may have a native mirror/reflection extent.
+        // Source vertices and camera matrices remain in authored coordinates.
+        const float sx=static_cast<float>(outputWidth)/
+            (attachment ? raster.displayWidth:static_cast<float>(options.logicalWidth));
+        const float sy=static_cast<float>(outputHeight)/
+            (attachment ? raster.displayHeight:static_cast<float>(options.logicalHeight));
+        viewport={static_cast<float>(target.left)*sx,static_cast<float>(target.top)*sy,
+            raster.displayWidth*sx,raster.displayHeight*sy,0.0f,1.0f};
+        raster.originalViewport=viewport;
+        const auto left=std::clamp(static_cast<std::int32_t>(viewport.x),0,static_cast<std::int32_t>(outputWidth));
+        const auto top=std::clamp(static_cast<std::int32_t>(viewport.y),0,static_cast<std::int32_t>(outputHeight));
+        const auto right=std::clamp(static_cast<std::int32_t>(viewport.x+viewport.width),left,static_cast<std::int32_t>(outputWidth));
+        const auto bottom=std::clamp(static_cast<std::int32_t>(viewport.y+viewport.height),top,static_cast<std::int32_t>(outputHeight));
+        raster.scissor={{left,top},{static_cast<std::uint32_t>(right-left),static_cast<std::uint32_t>(bottom-top)}};
+        // Display calibration translates the final raster, not the rear
+        // image a second time before that image is composited.
+        if(!destination)raster.translation=frame.DisplayTranslation();
+        const auto& translation=raster.translation;
+        if(translation[0]!=0.0 || translation[1]!=0.0) {
+            // Shift the final display rectangle, then crop it to the actual
+            // target before forming Vulkan integers or viewport coordinates.
+            // A huge persisted word can move a view fully offscreen without
+            // overflowing a cast or violating viewportBoundsRange.
+            const double x=static_cast<double>(viewport.x)+translation[0]*outputWidth;
+            const double y=static_cast<double>(viewport.y)+translation[1]*outputHeight;
+            const double width=viewport.width,height=viewport.height;
+            const double l=std::clamp(x,0.0,static_cast<double>(outputWidth));
+            const double t=std::clamp(y,0.0,static_cast<double>(outputHeight));
+            const double r=std::clamp(x+width,0.0,static_cast<double>(outputWidth));
+            const double b=std::clamp(y+height,0.0,static_cast<double>(outputHeight));
+            if(r<=l || b<=t) {raster.scissor={};return raster;}
+            const double w=r-l,h=b-t;
+            // Homogeneous affine conversion into that cropped viewport.
+            // Its image is exactly the translated original view intersected
+            // with the client area; z/w, UV and source colors stay intact.
+            raster.clipScale={{width/w,height/h}};
+            raster.clipOffset={{(2.0*(x-l)+width-w)/w,(2.0*(y-t)+height-h)/h}};
+            viewport={static_cast<float>(l),static_cast<float>(t),static_cast<float>(w),
+                static_cast<float>(h),viewport.minDepth,viewport.maxDepth};
+            const auto il=static_cast<std::int32_t>(std::floor(l));
+            const auto it=static_cast<std::int32_t>(std::floor(t));
+            const auto ir=static_cast<std::int32_t>(std::ceil(r));
+            const auto ib=static_cast<std::int32_t>(std::ceil(b));
+            raster.scissor={{il,it},{static_cast<std::uint32_t>(ir-il),static_cast<std::uint32_t>(ib-it)}};
+        }
+        return raster;
+    };
+    const auto appendBatch=[&](const VkDrawBatch& batch) {
+        if(!batches.empty() && batch.Continues(batches.back())) {
+            batches.back().count+=batch.count;
+            batches.back().nativeSpanCount+=batch.nativeSpanCount;
+        } else batches.push_back(batch);
+    };
+    const auto applyDepthRange=[&](const EcstasyDrawCommand& draw,VkDrawBatch& batch) {
+        const auto* projection=draw.ClipToScreen().data();
+        const std::array<float,5> key{{projection[10],projection[11],projection[14],projection[15],
+            static_cast<float>(draw.target->format)}};
+        if(!depthRangeValid || key!=lastDepthProjection) {
+            lastDepthRange=ecstasyNativeDepthRange(projection,draw.target->format);
+            lastDepthProjection=key;depthRangeValid=true;
+        }
+        batch.viewport.minDepth=lastDepthRange[0];batch.viewport.maxDepth=lastDepthRange[1];
+    };
+    std::array<const EcstasyDrawInstance*,1024> validatedSceneryInstances{};
+    const auto prepareSceneryPacket=[&](const EcstasyDrawCommand& draw) {
+        if(draw.kind!=EcstasyDrawKind::SolidStrip || !draw.instance || !draw.strip ||
+            !draw.texture || draw.sampledTarget || draw.orderingTexture ||
+            draw.carShadow!=EcstasyCarShadow::None || !draw.target ||
+            draw.target->id<0 || draw.target->id>14 ||
+            draw.target->width<=0 || draw.target->height<=0)return false;
+        const auto textureIndex=resolveTexture(*draw.texture,NativeDrawClampsTexture(draw));
+        auto& texture=textures[textureIndex];
+        const auto* wire=draw.texture->descriptor->authoredRecord;
+        // Scrolling materials retain the normal dynamic preparation path.
+        if(wire[0x79])return false;
+        const auto destination=draw.target->id>=7 ? draw.target->id:0;
+        const auto& raster=rasterFor(*draw.target,destination);
+        if(!raster.scissor.extent.width || !raster.scissor.extent.height)return false;
+        const auto& strip=*draw.strip;
+        const auto count=strip.positions.size();
+        Require(strip.textureCoordinates.size()==count && strip.colors.size()==count,
+            "Original strip vertex/color/UV extents differ");
+        Require(count<=48,"Vulkan strip exceeds the original packet vertex extent");
+        Require(std::isfinite(draw.textureQScale),"Native solid texture Q scale is nonfinite");
+        if(draw.drawFlags&0xc0u)
+            Require(draw.LightContext() && draw.lightMaterial && strip.normals.size()==count,
+                "Lit strip lacks its source context, material or signed normal payload");
+        const auto identity=reinterpret_cast<std::uintptr_t>(draw.instance);
+        auto& validated=validatedSceneryInstances[((identity>>4)^(identity>>12))&
+            (validatedSceneryInstances.size()-1)];
+        if(validated!=draw.instance) {
+            Require(std::all_of(draw.LocalToClip().begin(),draw.LocalToClip().end(),
+                [](float value){return std::isfinite(value);}),"Native solid projection matrix is nonfinite");
+            validated=draw.instance;
+        }
+        VkSolidStripJob job;job.draw=&draw;
+        job.lod={{draw.textureQScale,static_cast<std::uint8_t>(strip.autoK)*0.0625f}};
+        job.lineTopology=(draw.nativeRenderEggState&EcstasyRenderEggWireframe)!=0;
+        bool prepare=false;
+        auto* resident=residentGeometry.Acquire(job,prepare);
+        if(!resident)return false;
+        const auto state=draw.nativeRenderEggState |
+            (static_cast<std::uint32_t>(draw.texture->drawFlag4Enabled)<<3) |
+            (static_cast<std::uint32_t>(draw.target->id==14)<<4);
+        VkDrawBatch batch;
+        if(const auto* cached=sceneryPackets.Find(*resident,texture.generation,state)) {
+            batch=*cached;
+            ++statistics.sceneryPacketHits;
+        } else {
+            const auto& material=ResolveOpaqueSceneryMaterial(texture,wire,options.textureFilter);
+            batch.indexed=true;batch.cachedOpaqueScenery=true;batch.residentGeometry=true;
+            batch.depth=true;batch.depthWrite=material.depthWrite;batch.blend=material.blend;
+            batch.blendConstant=material.blendConstant;batch.lodScale=material.lodScale;
+            batch.textureFunction=material.textureFunction;batch.minification=material.minification;
+            batch.alphaTest=material.fullAlpha || draw.texture->drawFlag4Enabled || draw.target->id==14 ? 0:2;
+            batch.wireframe=job.lineTopology;
+            batch.untextured=(draw.nativeRenderEggState&EcstasyRenderEggTexturing)==0;
+            batch.clampTopLeft=NativeDrawClampsTexture(draw);
+            batch.nativeGpuPosition=true;batch.count=resident->indexCount;batch.nativeSpanCount=1;
+            Require(batch.textureFunction>=0 && batch.textureFunction<=3,"Invalid authored GS texture function");
+            sceneryPackets.Store(*resident,texture.generation,state,batch);
+            ++statistics.sceneryPacketMisses;
+        }
+        // Frame-local ranges, shading, camera and viewport never enter the cache.
+        batch.texture=textureIndex;batch.target=destination;
+        batch.viewport=raster.viewport;batch.scissor=raster.scissor;
+        applyDepthRange(draw,batch);
+        batch.nativeLocalToClip=draw.LocalToClip();
+        batch.nativeClipMapping={{static_cast<float>(raster.clipScale[0]),static_cast<float>(raster.clipScale[1]),
+            static_cast<float>(raster.clipOffset[0]),static_cast<float>(raster.clipOffset[1])}};
+        batch.nativeTextureQScale=draw.textureQScale;
+        batch.nativeShadingIndex=nativeFrameShading.Capture(job,gatheredGlyphBounds);
+        Require(residentFrameIndices+resident->indexCount<=UINT32_MAX,
+            "Native resident frame index count exceeds32-bit draw range");
+        Require(gatheredResidentIndexSpans.size()<UINT32_MAX,"Native resident index span count exceeds32-bit range");
+        batch.first=static_cast<std::uint32_t>(residentFrameIndices);
+        batch.nativeSpanFirst=static_cast<std::uint32_t>(gatheredResidentIndexSpans.size());
+        gatheredResidentIndexSpans.push_back(resident);
+        residentFrameIndices+=resident->indexCount;residentFrameVertices+=job.count;
+        job.residentOutput=resident->shadow.data();
+        job.workUnits=prepare ? NativePendingVertexWork(job):0;
+        if(job.workUnits) {
+            if(directSourcePreparation)PrepareNativeSolidStripVertices(job,job.residentOutput);
+            else {nativePendingWork+=job.workUnits;nativeStripJobs.push_back(job);}
+        }
+        if(batch.count)appendBatch(batch);
+        return true;
+    };
     for (const auto& draw:frame.Commands()) {
+        if(draw.cachedOpaqueScenery) {
+            if(prepareSceneryPacket(draw))continue;
+            ++statistics.sceneryPacketFallbacks;
+        }
+        const auto shadowStarted=sampleShadowGather && draw.carShadow!=EcstasyCarShadow::None ?
+            Clock::now():Clock::time_point{};
         if(draw.kind==EcstasyDrawKind::BlackAndWhitePass || draw.kind==EcstasyDrawKind::DestinationFilterPass) {
             Require(draw.target && draw.target->id>=0 && draw.target->id<7 && draw.feedbackGroup,
                 "Colour feedback lost its original view or source-stage group");
@@ -8288,7 +8892,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         const bool layeredUi=ui && (draw.rasterState[2]&255u)!=0;
         Require(elementIndices.size()<=std::numeric_limits<std::uint32_t>::max(),
             "Vulkan frame index count exceeds32-bit draw range");
-        VkDrawBatch batch;batch.indexed=true;
+        VkDrawBatch batch;batch.indexed=true;batch.cachedOpaqueScenery=draw.cachedOpaqueScenery;
         batch.first=static_cast<std::uint32_t>(elementIndices.size());batch.texture=textureIndex;
         // AttachMicroCode's TME/primitive controls feed the solid VU
         // templates; UI and immediate particle packets have independent PRIM.
@@ -8300,130 +8904,87 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         // actual authored texture. Native image/history passes own samplers.
         batch.clampTopLeft=NativeDrawClampsTexture(draw);
         batch.target=destination;batch.sampledTarget=sampled;batch.sampledPreviousFrame=draw.sampledPreviousFrame;
-        batch.depth=(!ui || layeredUi || rearSample || mirrorOverlay || filter || screenPolygon);
-        batch.depthWrite=targetSample || filter ? draw.zWriteEnabled:
-            layeredUi ? draw.zWriteEnabled && wire[0x50]!=0:!ui && draw.zWriteEnabled && !draw.depthSorted;
-        if(reflection || specular || remap)batch.depthWrite=false;
-        batch.blend=draw.rasterState[0];batch.blendConstant=static_cast<float>(draw.rasterState[1]&255u)/128.0f;
-        batch.textureFunction=targetSample || reflection ? 0:wire[0x4e];
-        batch.alphaTest=rearSample ? ecstasyNativeMirrorCompositeAlphaTest() :
-            targetSample || reflection || specular || filter ? 0:draw.texture->requiresDepthSort ? 1:0;
-        batch.minification=targetSample ? 2:wire[0x70];
-        // UI coordinates are authored in640x480 and scaled by the PC
-        // output extent. Keep their atlas sampling linear at level0; the
-        // selectable world filter must not pixelate fonts or movie panels.
-        if(draw.kind==EcstasyDrawKind::FlailerPolygon)batch.minification=-1;
-        else if(options.textureFilter!=EcstasyTextureFilter::Authored)batch.minification=-2;
-        batch.lodScale=targetSample ? 1.0f:static_cast<float>(1u<<wire[0x71]);
         textureLod[0]=draw.textureQScale;
-        std::int32_t mipK=targetSample ? 0:ReadU16(wire+0x72)&0xfff;
-        if(mipK&0x800)mipK-=0x1000;
-        if(draw.kind==EcstasyDrawKind::SolidStrip) {
-            Require(draw.strip,"Mip-mapped model lost its original strip");
-            // CalcAutoK10C0F0 retains16 bits, but SetMipMapK11C328 gets
-            // lbu+3C and VU01E8..0220 copies that unsigned byte into TEX1 K.
-            mipK=static_cast<std::uint8_t>(draw.strip->autoK);
-        } else if(draw.kind==EcstasyDrawKind::WorldPolygon || draw.kind==EcstasyDrawKind::WorldStrip) {
-            // Immediate polygon110040 and strip110564 headers replicate
-            // zero into this same K lane before the common VU program.
-            mipK=0;
-        }
-        textureLod[1]=static_cast<float>(mipK)*0.0625f;
-        if(draw.kind==EcstasyDrawKind::SolidStrip || draw.kind==EcstasyDrawKind::WorldStrip ||
-            draw.kind==EcstasyDrawKind::WorldPolygon || particle || mirrorOverlay || screenPolygon) {
-            // Particle direct packets carry PRIM0x54 (ABE1) and pass through
-            // the very same AttachSolid/Alpha texture contexts. Their own
-            // packet does not override ALPHA, TEST or ZBUF.
-            // Final AttachMicroCode10AD78 enables PRIM.ABE for these packets.
-            // CreateTextureContext108CC0 writes ALPHA from descriptor76/77;
-            // descriptor4D only controls ordering, including unsorted shadows.
-            const auto alpha=wire[0x76];
-            if(!screenPolygon || !(draw.rasterState[1]&0x00ff0000u)) {
-                batch.blend=(alpha&3u)|(((alpha>>2)&3u)<<8)|
-                    (((alpha>>4)&3u)<<16)|(((alpha>>6)&3u)<<24);
-                batch.blendConstant=static_cast<float>(wire[0x77])/128.0f;
+        if(batch.cachedOpaqueScenery) {
+            const auto& material=ResolveOpaqueSceneryMaterial(textures[textureIndex],wire,options.textureFilter);
+            batch.blend=material.blend;batch.blendConstant=material.blendConstant;
+            batch.lodScale=material.lodScale;batch.textureFunction=material.textureFunction;
+            batch.minification=material.minification;
+            batch.depth=true;batch.depthWrite=material.depthWrite;
+            batch.alphaTest=material.fullAlpha || draw.texture->drawFlag4Enabled || draw.target->id==14?0:2;
+            textureLod[1]=static_cast<std::uint8_t>(draw.strip->autoK)*0.0625f;
+        } else {
+            batch.depth=(!ui || layeredUi || rearSample || mirrorOverlay || filter || screenPolygon);
+            batch.depthWrite=targetSample || filter ? draw.zWriteEnabled:
+                layeredUi ? draw.zWriteEnabled && wire[0x50]!=0:!ui && draw.zWriteEnabled && !draw.depthSorted;
+            if(reflection || specular || remap)batch.depthWrite=false;
+            batch.blend=draw.rasterState[0];batch.blendConstant=static_cast<float>(draw.rasterState[1]&255u)/128.0f;
+            batch.textureFunction=targetSample || reflection ? 0:wire[0x4e];
+            batch.alphaTest=rearSample ? ecstasyNativeMirrorCompositeAlphaTest() :
+                targetSample || reflection || specular || filter ? 0:draw.texture->requiresDepthSort ? 1:0;
+            batch.minification=targetSample ? 2:wire[0x70];
+            // UI coordinates are authored in640x480 and scaled by the PC
+            // output extent. Keep their atlas sampling linear at level0; the
+            // selectable world filter must not pixelate fonts or movie panels.
+            if(draw.kind==EcstasyDrawKind::FlailerPolygon)batch.minification=-1;
+            else if(options.textureFilter!=EcstasyTextureFilter::Authored)batch.minification=-2;
+            batch.lodScale=targetSample ? 1.0f:static_cast<float>(1u<<wire[0x71]);
+            std::int32_t mipK=targetSample ? 0:ReadU16(wire+0x72)&0xfff;
+            if(mipK&0x800)mipK-=0x1000;
+            if(draw.kind==EcstasyDrawKind::SolidStrip) {
+                Require(draw.strip,"Mip-mapped model lost its original strip");
+                // CalcAutoK10C0F0 retains16 bits, but SetMipMapK11C328 gets
+                // lbu+3C and VU01E8..0220 copies that unsigned byte into TEX1 K.
+                mipK=static_cast<std::uint8_t>(draw.strip->autoK);
+            } else if(draw.kind==EcstasyDrawKind::WorldPolygon || draw.kind==EcstasyDrawKind::WorldStrip) {
+                // Immediate polygon110040 and strip110564 headers replicate
+                // zero into this same K lane before the common VU program.
+                mipK=0;
             }
-            // Final AttachSolidPolys10BC00..10BC38 and AttachAlphaPolys10BA24..10BA4C
-            // choose context bit0 from descriptor4F OR runtime74, independently
-            // of the sorting lane4D. Contexts0/2 carry TEST GREATER with AREF48;
-            // contexts1/3 carry GEQUAL0 (PAL105AC0 UpdateGifTags). Alpha is
-            // expressed in the same128-unit GS range by this native shader.
-            const bool fullAlpha=(wire[0x4f]!=0) || draw.texture->drawFlag4Enabled;
-            batch.alphaTest=fullAlpha || draw.target->id==14 ? 0:2;
-            // The same source context bit1 is descriptor50 gated by the
-            // captured original Z-write state, not by depth sorting.
-            batch.depthWrite=draw.zWriteEnabled && wire[0x50]!=0;
+            textureLod[1]=static_cast<float>(mipK)*0.0625f;
+            if(draw.kind==EcstasyDrawKind::SolidStrip || draw.kind==EcstasyDrawKind::WorldStrip ||
+                draw.kind==EcstasyDrawKind::WorldPolygon || particle || mirrorOverlay || screenPolygon) {
+                // Particle direct packets carry PRIM0x54 (ABE1) and pass through
+                // the very same AttachSolid/Alpha texture contexts. Their own
+                // packet does not override ALPHA, TEST or ZBUF.
+                // Final AttachMicroCode10AD78 enables PRIM.ABE for these packets.
+                // CreateTextureContext108CC0 writes ALPHA from descriptor76/77;
+                // descriptor4D only controls ordering, including unsorted shadows.
+                const auto alpha=wire[0x76];
+                if(!screenPolygon || !(draw.rasterState[1]&0x00ff0000u)) {
+                    batch.blend=(alpha&3u)|(((alpha>>2)&3u)<<8)|
+                        (((alpha>>4)&3u)<<16)|(((alpha>>6)&3u)<<24);
+                    batch.blendConstant=static_cast<float>(wire[0x77])/128.0f;
+                }
+                // Final AttachSolidPolys10BC00..10BC38 and AttachAlphaPolys10BA24..10BA4C
+                // choose context bit0 from descriptor4F OR runtime74, independently
+                // of the sorting lane4D. Contexts0/2 carry TEST GREATER with AREF48;
+                // contexts1/3 carry GEQUAL0 (PAL105AC0 UpdateGifTags). Alpha is
+                // expressed in the same128-unit GS range by this native shader.
+                const bool fullAlpha=(wire[0x4f]!=0) || draw.texture->drawFlag4Enabled;
+                batch.alphaTest=fullAlpha || draw.target->id==14 ? 0:2;
+                // The same source context bit1 is descriptor50 gated by the
+                // captured original Z-write state, not by depth sorting.
+                batch.depthWrite=draw.zWriteEnabled && wire[0x50]!=0;
+            }
         }
         Require(batch.textureFunction>=0 && batch.textureFunction<=3,"Invalid authored GS texture function");
-        // Source targets are authored in the original display coordinates;
-        // viewport scaling maps them to the selected native output resolution.
-        const float displayWidth=static_cast<float>(draw.target->width);
-        const float displayHeight=static_cast<float>(draw.target->height);
-        const auto outputWidth=destination ? renderedTargets.at(destination).width:options.width;
-        const auto outputHeight=destination ? renderedTargets.at(destination).height:options.height;
-        // Offscreen attachments may have a native mirror/reflection extent.
-        // Source vertices and camera matrices remain in authored coordinates.
-        const float sx=destination ? static_cast<float>(outputWidth)/displayWidth :
-            static_cast<float>(options.width)/static_cast<float>(options.logicalWidth);
-        const float sy=destination ? static_cast<float>(outputHeight)/displayHeight :
-            static_cast<float>(options.height)/static_cast<float>(options.logicalHeight);
-        batch.viewport={static_cast<float>(draw.target->left)*sx,static_cast<float>(draw.target->top)*sy,
-            displayWidth*sx,displayHeight*sy,0.0f,1.0f};
-        // Keep the uncropped screen transform for the authored rear-view
-        // scissor; display translation later changes the viewport itself.
-        const auto originalViewport=batch.viewport;
+        const auto& raster=rasterFor(*draw.target,destination);
+        const auto displayWidth=raster.displayWidth,displayHeight=raster.displayHeight;
+        const auto outputWidth=raster.outputWidth,outputHeight=raster.outputHeight;
+        const auto& originalViewport=raster.originalViewport;
+        const auto& translation=raster.translation;
+        const auto& clipScale=raster.clipScale;
+        const auto& clipOffset=raster.clipOffset;
+        batch.viewport=raster.viewport;
+        batch.scissor=raster.scissor;
         std::array<float,2> uiCanvasScale{{1.0f,1.0f}};
         if(draw.kind==EcstasyDrawKind::FlailerPolygon &&
            draw.uiPlacement==EcstasyUiPlacement::CenteredCanvas &&
            (draw.rasterState[1]&0x01000000u))
             uiCanvasScale=nativeUiCanvasScale(originalViewport.width,originalViewport.height);
         const double maximumDepth=draw.target->format==0x31 ? 16777215.0:65535.0;
-        if(!ui && !particle) {
-            const auto* projection=draw.clipToScreen.data();
-            const std::array<float,5> key{{projection[10],projection[11],projection[14],projection[15],
-                static_cast<float>(draw.target->format)}};
-            if(!depthRangeValid || key!=lastDepthProjection) {
-                lastDepthRange=ecstasyNativeDepthRange(projection,draw.target->format);
-                lastDepthProjection=key;depthRangeValid=true;
-            }
-            batch.viewport.minDepth=lastDepthRange[0];batch.viewport.maxDepth=lastDepthRange[1];
-        }
-        const auto left=std::clamp(static_cast<std::int32_t>(batch.viewport.x),0,static_cast<std::int32_t>(outputWidth));
-        const auto top=std::clamp(static_cast<std::int32_t>(batch.viewport.y),0,static_cast<std::int32_t>(outputHeight));
-        const auto right=std::clamp(static_cast<std::int32_t>(batch.viewport.x+batch.viewport.width),left,static_cast<std::int32_t>(outputWidth));
-        const auto bottom=std::clamp(static_cast<std::int32_t>(batch.viewport.y+batch.viewport.height),top,static_cast<std::int32_t>(outputHeight));
-        batch.scissor={{left,top},{static_cast<std::uint32_t>(right-left),static_cast<std::uint32_t>(bottom-top)}};
-        std::array<double,2> clipScale{{1.0,1.0}},clipOffset{};
-        // Display calibration translates the final raster, not the rear
-        // image a second time before that image is composited.
-        const auto translation=destination ? std::array<double,2>{}:frame.DisplayTranslation();
-        if(translation[0]!=0.0 || translation[1]!=0.0) {
-            // Shift the final display rectangle, then crop it to the actual
-            // target before forming Vulkan integers or viewport coordinates.
-            // A huge persisted word can move a view fully offscreen without
-            // overflowing a cast or violating viewportBoundsRange.
-            const double x=static_cast<double>(batch.viewport.x)+translation[0]*outputWidth;
-            const double y=static_cast<double>(batch.viewport.y)+translation[1]*outputHeight;
-            const double width=batch.viewport.width,height=batch.viewport.height;
-            const double l=std::clamp(x,0.0,static_cast<double>(outputWidth));
-            const double t=std::clamp(y,0.0,static_cast<double>(outputHeight));
-            const double r=std::clamp(x+width,0.0,static_cast<double>(outputWidth));
-            const double b=std::clamp(y+height,0.0,static_cast<double>(outputHeight));
-            if(r<=l || b<=t)continue;
-            const double w=r-l,h=b-t;
-            // Homogeneous affine conversion into that cropped viewport.
-            // Its image is exactly the translated original view intersected
-            // with the client area; z/w, UV and source colors stay intact.
-            clipScale={{width/w,height/h}};
-            clipOffset={{(2.0*(x-l)+width-w)/w,(2.0*(y-t)+height-h)/h}};
-            batch.viewport={static_cast<float>(l),static_cast<float>(t),static_cast<float>(w),
-                static_cast<float>(h),batch.viewport.minDepth,batch.viewport.maxDepth};
-            const auto il=static_cast<std::int32_t>(std::floor(l));
-            const auto it=static_cast<std::int32_t>(std::floor(t));
-            const auto ir=static_cast<std::int32_t>(std::ceil(r));
-            const auto ib=static_cast<std::int32_t>(std::ceil(b));
-            batch.scissor={{il,it},{static_cast<std::uint32_t>(ir-il),static_cast<std::uint32_t>(ib-it)}};
-        }
+        if(!ui && !particle)applyDepthRange(draw,batch);
         if(rearSample) {
             // B24: the camera image is sampled into the authored PAL
             // 160..352 x 20..84 quadrilateral. Constrain Vulkan raster
@@ -8450,7 +9011,25 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         // index buffer: no pixel can be emitted, and target/texture ownership
         // has already been processed exactly as in the existing path.
         if (!batch.scissor.extent.width || !batch.scissor.extent.height) continue;
-        auto position=[&](const float input[3]) {
+        // Feed dynamic world geometry to the same vertex shader projection
+        // as resident models on Switch. Keep the calibrated CPU path's
+        // double-precision viewport translation and the UI/particle paths.
+#ifdef __SWITCH__
+        const bool gpuWorldProjection=!ui && !particle && !solidPrimitive &&
+            translation[0]==0.0 && translation[1]==0.0;
+#else
+        constexpr bool gpuWorldProjection=false;
+#endif
+        if(gpuWorldProjection) {
+            batch.nativeGpuPosition=true;
+            batch.nativeLocalToClip=draw.LocalToClip();
+            batch.nativeTextureQScale=textureLod[0];
+        }
+        auto position=[&](const float input[3]) -> std::array<float,4> {
+            if(gpuWorldProjection) {
+                ++statistics.gpuWorldVertices;
+                return {input[0],input[1],input[2],1.0f};
+            }
             std::array<float,4> result{};
             if(ui) {
                 // ScaleCoordinates is byte97. Flailer authored coordinates
@@ -8489,7 +9068,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
                 result={(x*2.0f/width-1.0f)*uiCanvasScale[0],
                     (y*2.0f/height-1.0f)*uiCanvasScale[1],projectedDepth,1.0f};
             } else {
-                eMulVector3(result.data(),draw.localToClip.data(),input);
+                eMulVector3(result.data(),draw.LocalToClip().data(),input);
                 // Original perspective clip Z is[-W,+W]; Vulkan is[0,W].
                 result[2]=(result[2]+result[3])*0.5f;
             }
@@ -8503,7 +9082,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             batch.nativeGpuPosition=true;
             Require(std::isfinite(draw.textureQScale),"Native solid texture Q scale is nonfinite");
             batch.nativeTextureQScale=draw.textureQScale;
-            batch.nativeLocalToClip=draw.localToClip;
+            batch.nativeLocalToClip=draw.LocalToClip();
             Require(std::all_of(batch.nativeLocalToClip.begin(),batch.nativeLocalToClip.end(),
                 [](float v){return std::isfinite(v);}),"Native solid projection matrix is nonfinite");
             batch.nativeClipMapping={{static_cast<float>(clipScale[0]),static_cast<float>(clipScale[1]),
@@ -8513,7 +9092,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
                 "Original strip vertex/color/UV extents differ");
             Require(count<=48,"Vulkan strip exceeds the original packet vertex extent");
             const bool lit=(draw.drawFlags&0xc0u)!=0;
-            if(lit || reflection)Require(draw.lightContext && draw.lightMaterial && strip.normals.size()==count,
+            if(lit || reflection)Require(draw.LightContext() && draw.lightMaterial && strip.normals.size()==count,
                 "Lit strip lacks its source context, material or signed normal payload");
             float scroll[2]{};
             const auto* textureRecord=draw.orderingTexture ? draw.orderingTexture->descriptor->authoredRecord:
@@ -8627,15 +9206,24 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         Require(elementIndices.size()<=std::numeric_limits<std::uint32_t>::max(),"Vulkan frame index count exceeds32-bit draw range");
         if(!batch.residentGeometry)batch.count=static_cast<std::uint32_t>(elementIndices.size())-batch.first;
         if(batch.count && batch.scissor.extent.width && batch.scissor.extent.height) {
+            if(draw.carShadow!=EcstasyCarShadow::None) {
+                const auto shadow=static_cast<std::size_t>(draw.carShadow)-1;
+                ++profile.shadowStrips[shadow];
+                profile.shadowTriangles[shadow]+=batch.count/3u;
+            }
             // A Vulkan draw is only a transport boundary. Concatenate adjacent
             // triangles when every consumed GPU state value agrees. Original
             // packet order, texture versions, alpha/depth, and target changes
             // are untouched; no sorting or transparency approximation occurs.
-            if(!batches.empty() && batch.Continues(batches.back())) {
-                batches.back().count+=batch.count;batches.back().nativeSpanCount+=batch.nativeSpanCount;
-            } else batches.push_back(batch);
+            appendBatch(batch);
+        }
+        if(shadowStarted!=Clock::time_point{}) {
+            const auto shadow=static_cast<std::size_t>(draw.carShadow)-1;
+            profile.shadowGatherMilliseconds[shadow]+=
+                std::chrono::duration<double,std::milli>(Clock::now()-shadowStarted).count();
         }
     }
+    const auto finishStarted=Clock::now();
     if(!directSourcePreparation) {
         const auto prepareJob=[&](std::size_t jobIndex) {
             const auto& job=nativeStripJobs[jobIndex];
@@ -8664,7 +9252,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     }
     residentGeometry.CompletePreparation();
     ResolveNativeResidentIndices(residentIndexCache,gatheredResidentIndexSpans,elementIndices,batches);
-
+    profile.gatherFinishMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-finishStarted).count();
 }
 
 void EcstasyVulkanDevice::Storage::RecordDepthTransfers(const std::vector<EcstasyDepthTransfer>& requests,
@@ -8851,8 +9439,14 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     const auto lastGpu=statistics.gpuMilliseconds;
     const auto lastGpuFrame=statistics.completedGpuFrame;
     const auto lastGpuAvailable=statistics.gpuTimeAvailable;
+    const auto lastGpuProfile=statistics.gpuProfile;
+    const auto lastRenderProfile=statistics.renderProfile;
     statistics={};statistics.gpuMilliseconds=lastGpu;statistics.completedGpuFrame=lastGpuFrame;
-    statistics.gpuTimeAvailable=lastGpuAvailable;
+    statistics.gpuTimeAvailable=lastGpuAvailable;statistics.gpuProfile=lastGpuProfile;
+    if(reuse) {
+        statistics.renderProfile.shadowStrips=lastRenderProfile.shadowStrips;
+        statistics.renderProfile.shadowTriangles=lastRenderProfile.shadowTriangles;
+    }
     statistics.presentationTarget=swapchain!=VK_NULL_HANDLE;
     statistics.availableCpuThreads=NativeSceneEffectiveHardwareConcurrency();
     statistics.reusedPreparation=reuse;
@@ -8955,8 +9549,11 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     destinations.insert(0); // The display is cleared/presented even without geometry.
     VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkRequired(vkBeginCommandBuffer(commands,&begin),"vkBeginCommandBuffer");
+    // Sparse pass timestamps limit command and synchronization overhead.
+    const bool sampleGpuTargets=timestampQueries && (nextSubmission%16u==0);
+    std::uint32_t timestampCount=2;
     if(timestampQueries) {
-        vkCmdResetQueryPool(commands,timestampQueries,0,2);
+        vkCmdResetQueryPool(commands,timestampQueries,0,sampleGpuTargets ? TimestampQueryCapacity:2);
         vkCmdWriteTimestamp(commands,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,timestampQueries,0);
     }
 
@@ -9264,15 +9861,32 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         // Compile only the actually referenced complete pipeline states,
         // before entering the render pass. Depth sampling is the same exact
         // interval selected below; no speculative variants are manufactured.
+        VkPipeline focusTapPipeline{};
+        const auto pipelineLookupStarted=Clock::now();
         if(!reuseRecording)for(std::size_t index=0;index<packets.size();++index) {
             const auto& batch=*packets[index];
             const bool sample=fogPlan.present && fogPlan.direct && index>=fogPlan.first && index<=fogPlan.last;
-            preparedPipelines.push_back(Pipeline(batch,sample));
+            VkPipeline pipeline{};
+            if(batch.cachedOpaqueScenery && !sample && samples==VK_SAMPLE_COUNT_1_BIT) {
+                const unsigned variant=static_cast<unsigned>(batch.wireframe) |
+                    (static_cast<unsigned>(batch.untextured)<<1) |
+                    (static_cast<unsigned>(batch.clampTopLeft)<<2) |
+                    (static_cast<unsigned>(batch.depthWrite)<<3) |
+                    (static_cast<unsigned>(batch.alphaTest!=0)<<4);
+                auto& cached=textures[batch.texture].scenery.pipelines[variant];
+                if(cached)++statistics.sceneryPipelineHits;
+                else cached=Pipeline(batch);
+                pipeline=cached;
+            } else pipeline=Pipeline(batch,sample);
             if(batch.textureFunction==8) {
                 VkDrawBatch tap;tap.target=-1;tap.blend=0x01020200u;tap.depth=tap.depthWrite=false;
-                tap.textureFunction=7;tap.postProcess=true;(void)Pipeline(tap);
+                tap.textureFunction=7;tap.postProcess=true;focusTapPipeline=Pipeline(tap);
+                if(!focusTapPipeline)pipeline=VK_NULL_HANDLE;
             }
+            if(!pipeline)++statistics.pendingPipelineDraws;
+            preparedPipelines.push_back(pipeline);
         }
+        statistics.renderProfile.pipelineLookupMilliseconds+=milliseconds(Clock::now()-pipelineLookupStarted);
         const auto recordRange=[&](VkCommandBuffer recordCommands,
             std::size_t firstPacket,std::size_t lastPacket)->std::uint64_t {
             VkBuffer activeVertexBuffer=VK_NULL_HANDLE,activeIndexBuffer=VK_NULL_HANDLE;
@@ -9285,6 +9899,8 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
             vkCmdBindDescriptorSets(recordCommands,VK_PIPELINE_BIND_POINT_GRAPHICS,
                 pipelineLayout,1,1,&frameDescriptor,0,nullptr);
             for(std::size_t packetIndex=firstPacket;packetIndex<lastPacket;++packetIndex) {
+                const auto pipeline=preparedPipelines[packetIndex];
+                if(!pipeline)continue;
                 const auto& batch=*packets[packetIndex];
                 const auto vertexBuffer=batch.residentGeometry ? residentVertices.buffer:vertices.buffer;
                 Require(vertexBuffer!=VK_NULL_HANDLE,"Vulkan draw lost its selected vertex storage");
@@ -9293,7 +9909,6 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
                     activeVertexBuffer=vertexBuffer;
 
                 }
-                const auto pipeline=preparedPipelines[packetIndex];
                 if(pipeline!=activePipeline) {
                     vkCmdBindPipeline(recordCommands,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline);
                     activePipeline=pipeline;
@@ -9472,10 +10087,14 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
                 else CopyFogDepth();
                 copiedFogDepth=true;
             }
-            if(batch.textureFunction==8) {
-                Require(id==0 && focusSource.descriptor && focusBlur.color.image,
+            if(batch.textureFunction==8 && preparedPipelines[packetIndex]) {
+                if(reuseRecording) {
+                    VkDrawBatch tap;tap.target=-1;tap.blend=0x01020200u;
+                    tap.textureFunction=7;tap.postProcess=true;focusTapPipeline=Pipeline(tap);
+                }
+                Require(focusTapPipeline && id==0 && focusSource.descriptor && focusBlur.color.image,
                     "Focus composite lost its current scratch images");
-                endPass();BlurFocus(batch);
+                endPass();BlurFocus(batch,focusTapPipeline);
             }
             if(!passActive)resume();
             const auto first=packetIndex++;
@@ -9494,6 +10113,8 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     // image dependencies between targets. Previous-frame sampling is a
     // different image and must never introduce a current-frame feedback loop.
     std::array<std::uint8_t,15> visited{};
+    if(sampleGpuTargets)
+        vkCmdWriteTimestamp(commands,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestampQueries,timestampCount++);
     const auto visit=[&](const auto& self,std::int32_t id)->void {
         Require(id>=0 && id<static_cast<std::int32_t>(visited.size()),"Vulkan target graph lost its target range");
         const auto index=static_cast<std::size_t>(id);
@@ -9502,20 +10123,30 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         visited[index]=1;
         for(const auto dependency:targetDependencies[index])self(self,dependency);
         recordPass(id);visited[index]=2;
+        if(sampleGpuTargets) {
+            Require(timestampCount<timestampTargetIds.size(),"GPU target timing exceeds its query pool");
+            timestampTargetIds[timestampCount]=id;
+            vkCmdWriteTimestamp(commands,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestampQueries,timestampCount++);
+        }
     };
+    const auto sceneRecordStarted=Clock::now();
     for(const auto id:destinations)visit(visit,id);
+    statistics.renderProfile.recordSceneMilliseconds=std::max(0.0,
+        milliseconds(Clock::now()-sceneRecordStarted)-statistics.renderProfile.pipelineLookupMilliseconds);
     // FXAA samples the CURRENT image through the existing history descriptor,
     // so it still needs a same-frame transfer. Ordinary race frames do not.
     // A future frame with a genuine previous-frame reader copies the retained
     // completed color before that frame overwrites it (above).
-    if(antialiasing.count) {
+    const auto antialiasingPipeline=antialiasing.count?Pipeline(antialiasing):VK_NULL_HANDLE;
+    if(antialiasing.count && !antialiasingPipeline)++statistics.pendingPipelineDraws;
+    if(antialiasingPipeline) {
         CopyFeedback(0);
 
         VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         pass.renderPass=postProcessRenderPass;pass.framebuffer=postProcessFramebuffer;
         pass.renderArea={{0,0},{options.width,options.height}};
         vkCmdBeginRenderPass(commands,&pass,VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdBindPipeline(commands,VK_PIPELINE_BIND_POINT_GRAPHICS,Pipeline(antialiasing));
+        vkCmdBindPipeline(commands,VK_PIPELINE_BIND_POINT_GRAPHICS,antialiasingPipeline);
         vkCmdBindDescriptorSets(commands,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelineLayout,1,1,&frameDescriptor,0,nullptr);
 
         const VkDeviceSize offset=0;vkCmdBindVertexBuffers(commands,0,1,&vertices.buffer,&offset);
@@ -9573,10 +10204,15 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         submission.signalSemaphoreCount=1;submission.pSignalSemaphores=&presentationSemaphores[swapIndex];
     }
     vkRequired(vkResetFences(device,1,&fence),"vkResetFences");
+    const auto queueSubmitStarted=Clock::now();
     vkRequired(vkQueueSubmit(queue,1,&submission,fence),"vkQueueSubmit");
+    statistics.renderProfile.queueSubmitMilliseconds=milliseconds(Clock::now()-queueSubmitStarted);
     statistics.submittedFrame=++nextSubmission;statistics.drawBatches=executedDrawCommands;
     statistics.commandRecordingThreads=static_cast<std::uint32_t>(recordingThreads.size());
-    if(timestampQueries)querySubmission=statistics.submittedFrame;
+    if(timestampQueries) {
+        querySubmission=statistics.submittedFrame;
+        submittedTimestampCount=timestampCount;
+    }
     statistics.recordSubmitMilliseconds=std::max(0.0,milliseconds(Clock::now()-renderBegin)-
         statistics.gatherMilliseconds-statistics.fenceWaitMilliseconds);
 
@@ -9625,7 +10261,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     if(frame)frame->Complete();
     hasFrame=true;preparedFrame.valid=true;
     recordedBuffers=RecordedBufferHandles();recordedFrameDescriptor=frameDescriptor;
-    recordedPipelineLayout=pipelineLayout;recordedCommandsValid=true;
+    recordedPipelineLayout=pipelineLayout;recordedCommandsValid=statistics.pendingPipelineDraws==0;
 
     for(auto& entry:renderedTargets)entry.second.initialized=true;
     // Successful QueueSubmit publishes captured image content for the next
