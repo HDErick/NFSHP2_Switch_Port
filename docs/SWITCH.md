@@ -101,7 +101,17 @@ while suppressing race geometry capture. The cap includes capture time in its
 interval. It does not change the simulation clock, video-blank notifications,
 audio sample rate, or replay time.
 
-`render.adaptive_distance scale=...` records a change between 0.6 and 0.4.
+`render.adaptive_distance scale=...` records changes between 0.6, 0.4 and 0.2.
+`render.adaptive_quality` records emergency activation/restoration, mirror range,
+near-detail thresholds and the shadow/reflection policy. At the default cap,
+one second at 23 FPS or lower activates the emergency tier even during a hold.
+Five stable windows at 28 FPS restore the 0.4 tier and normal scene quality;
+five at 29.5 FPS then restore 0.6. See the README for all quality reductions.
+Tier changes invalidate prepared rendering before the next scene capture;
+workers see one fixed quality policy for that frame. Environment camera-face
+completion is suppressed while cubemap geometry is omitted. Cosmetic particle
+thinning only affects render submission, with stable pool-slot selection; all
+particles continue their original simulation and lifecycle.
 `audio.backend_window` separates music decode, device command processing,
 software mixing/PCM conversion, and output-service work. These are accumulated
 milliseconds per fresh submitted frame across the same five-second window;

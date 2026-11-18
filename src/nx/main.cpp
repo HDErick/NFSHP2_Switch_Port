@@ -316,10 +316,17 @@ private:
         return ready;
     }
     void SetDrawDistance(float scale) {
-        if(hp2::nativeRenderSettings().drawDistanceScale==scale)return;
-        auto settings=hp2::nativeRenderSettings();settings.drawDistanceScale=scale;
+        const bool emergency=scale<0.3f;
+        const float mirror=emergency ? 0.25f:0.5f;
+        if(hp2::nativeRenderSettings().drawDistanceScale==scale &&
+            hp2::nativeRenderSettings().mirrorDistanceScale==mirror && hp2::nativeEmergencySceneQuality==emergency)return;
+        auto settings=hp2::nativeRenderSettings();settings.drawDistanceScale=scale;settings.mirrorDistanceScale=mirror;
+        hp2::nativeEmergencySceneQuality=emergency;
         hp2::configureNativeRenderSettings(settings);graphics_.InvalidatePrepared();
         log_<<"render.adaptive_distance scale="<<scale<<std::endl;
+        log_<<"render.adaptive_quality emergency="<<emergency<<" main_distance="<<scale
+            <<" mirror_distance="<<mirror<<" near_enter="<<(emergency?15:35)<<" near_exit="<<(emergency?22:50)
+            <<" reflections="<<!emergency<<" car_shadows="<<!emergency<<std::endl;
     }
     void Presented(hp2::NativeFrameTiming::Clock::time_point started) {
         // Include CPU capture in the capped interval. Starting the timer

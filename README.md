@@ -63,12 +63,26 @@ the game/profile until a language is explicitly selected; `0` English, `1`
 French, `2` German, `3` Italian, `4` Spanish and `5` Swedish select one directly.
 
 
-Adaptive distance starts at **0.6×** for the main view and drops to **0.4×** after
-two consecutive one-second windows below 28 FPS. It restores 0.6× after five
-windows at 29.5 FPS or better, with a five-window hold after each transition.
-Thresholds scale down when choosing a cap below 30. It resets outside active
-racing and after HOME resume. Set `adaptive_draw_distance=0` to keep 0.6×.
-The rear-view distance stays at 0.5×. Vehicle LOD stays at 1.75×.
+Adaptive distance starts at **0.6×** and drops to **0.4×** after two consecutive
+one-second windows below 28 FPS. At **23 FPS or lower**, one measured window
+activates emergency scene quality with **0.2×** main distance and **0.25×** mirror
+distance. This escalation can happen during an existing recovery hold.
+
+Emergency quality uses coarser scenery and vehicle meshes, a 15/22-unit scenery
+near-detail range, simpler wheels, fewer distant non-player vehicle particles,
+and no car shadows, environment reflections, specular passes, decorative world
+flares, skid-mark geometry or depth of field. Player/camera/munition warning
+effects remain visible. AI, collisions, audio, HUD and 1280×720 output retain
+their existing behavior.
+
+After five consecutive windows at **28 FPS or better**, emergency quality ends
+and distance returns to **0.4×**. Another five stable windows at **29.5 FPS or
+better** restore **0.6×**. Each transition has a five-second minimum dwell before
+quality increases. Thresholds scale down for caps below 30. All quality settings
+restore outside active racing and after HOME resume. Set
+`adaptive_draw_distance=0` to keep the normal 0.6×/0.5× quality profile.
+The normal vehicle LOD multiplier remains 1.75×; emergency mode removes that
+boost and simplifies non-player cars further.
 
 ### Controllers
 

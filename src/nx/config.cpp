@@ -37,7 +37,7 @@ bool SaveUserSettings() noexcept {
             <<"language="<<userSettings.language<<"\n"
             <<"# Show the FPS counter: 0 = off, 1 = on.\n"
             <<"show_fps="<<userSettings.showFps<<"\n"
-            <<"# Main-view distance: 0.6 normally, 0.4 under sustained load.\n"
+            <<"# Scene quality: 0.6 normally, 0.4 under load, emergency 0.2 at 23 FPS.\n"
             <<"adaptive_draw_distance="<<userSettings.adaptiveDrawDistance<<"\n";
         file.flush();const bool good=file.good();file.close();
         if(!good || file.fail())throw std::runtime_error("Could not write Switch config");

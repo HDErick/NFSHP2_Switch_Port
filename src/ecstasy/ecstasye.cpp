@@ -1887,7 +1887,7 @@ void EcstasyFrame::CaptureEnvironment(EnvironmentMap* environment,ResourceRegist
     inGameMaterials_=inGame;
     environment_=environment;environmentApplicationState_=applicationState;renderFrameCounter_=renderFrameCounter;
     environmentUpdated_=false;
-    environmentCameraFaces_=environment ? environment->PendingCameraFaces():0u;
+    environmentCameraFaces_=environment && !nativeEmergencySceneQuality ? environment->PendingCameraFaces():0u;
     // PAL112B28 downloads the actual CarSelectEnvMap descriptor into the
     // separate frontend texture slot used by AttachMicroCode10AF50/10B038.
     frontendEnvironmentTexture_=textureInfoForDescriptor(resources.SpecialTexture(8));
@@ -3092,6 +3092,7 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
             command.clipToScreen=&CaptureMaterialProjection(*strip.texture,projection);
         }
         command.strip=strip.geometry;command.drawFlags=lightContext?strip.flags:strip.flags&~0x1c0u;
+        if(nativeEmergencySceneQuality)command.drawFlags&=~0x180u;
         const auto index=static_cast<std::size_t>(strip.geometry->lightMaterialIndex);
         auto* material=index<geometry.lightMaterials.size()?geometry.lightMaterials[index]:nullptr;
         if(!material)material=fallback;
@@ -3152,7 +3153,7 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
     auto state=CaptureStripState();
     state.instance=&CaptureInstance(localToWorld,view,lightContext);
     state.projection=&CaptureProjection(view);
-    const bool environmentEnabled=environmentMappingEnabled!=0;
+    const bool environmentEnabled=environmentMappingEnabled!=0 && !nativeEmergencySceneQuality;
     std::size_t count=0;
     for(const auto& run:visible)count+=run.count;
     // Task size amortizes queue publication; CPU count is discovered by the
@@ -3200,7 +3201,7 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
         auto draw=static_cast<std::uint32_t>(strip.flags)|(texture->drawFlag4Enabled ? 4u:0u);
         if (clipClass==1)draw|=0x200u;
         if ((flags&1u) || !environmentEnabled)draw&=~0x100u;
-        if (flags&2u)draw&=~0x80u;
+        if ((flags&2u) || nativeEmergencySceneQuality)draw&=~0x80u;
         if (!lightContext)draw&=~0x1c0u; // released10DDE0 null-context mask
         const auto* submitted=&strip;
         if(boneMatrices) {
@@ -3347,7 +3348,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     Require(resources,"Display frame has no canonical resource owner");
     auto* simulation=scene.track ? scene.track->Simulation():nullptr;
     const auto applicationState=scene.applicationState ? *scene.applicationState:0;
-    if(scene.advancePresentation && scene.environmentMap && scene.environmentMap->enabled)
+    if(scene.advancePresentation && scene.environmentMap && scene.environmentMap->enabled && !nativeEmergencySceneQuality)
         UpdateEnvironmentMapCameras(*scene.environmentMap,views,simulation ? simulation->world:nullptr,
             scene.track ? scene.track->Players():nullptr,applicationState,scene.clock->realTimeElapsed);
     frame.CaptureEnvironment(scene.environmentMap,*resources,applicationState,views.renderFrameCounter,
@@ -3355,7 +3356,8 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     ecstasyViewsUpdateMode(&views);
     ecstasyViewsApplyMode(&views);
     const auto active=[](const CarCinematicScreen& view) {
-        return view.enabled && view.view && view.target && view.target->enabled;
+        return view.enabled && view.view && view.target && view.target->enabled &&
+            (!nativeEmergencySceneQuality || view.id<4);
     };
     for(auto& view:views.screens)if(active(view))
         Require(ecstasyViewCalculateMatrices(&views,&view,0,0,0)==CAR_CINEMATIC_OK,
@@ -3455,7 +3457,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         if(i<4 && simulation && simulation->world) {
             std::vector<SkidRenderQuad> skidQuads;
             WorldClans(*simulation->world).PrepareRender(view.matrices.worldToClip,view,skidQuads,
-                scene.advancePresentation,scene.emitRaceGeometry);
+                scene.advancePresentation,scene.emitRaceGeometry && !nativeEmergencySceneQuality);
             for(const auto& quad:skidQuads) {
                 frontend::FlailerPoly polygon;polygon.rasterState=quad.rasterState;
                 for(std::size_t vertex=0;vertex<quad.vertices.size();++vertex) {
@@ -3480,7 +3482,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
             (void)RenderWorldObjects(WorldObjects(*simulation->world),view,frame,
                 scene.clock->worldTimeFrames);
         // PAL11335C follows world objects with the authored light-flare pack.
-        if(scene.emitRaceGeometry && i<4 && scene.track && scene.flow)
+        if(scene.emitRaceGeometry && !nativeEmergencySceneQuality && i<4 && scene.track && scene.flow)
             (void)RenderWorldLightFlares(scene.track->files.Registry().Lights(),
                 scene.track->files.Registry(),view,frame,scene.flow->inGameFlag!=0);
     }
@@ -3516,7 +3518,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     // The scenery reflected strips read the previous mapped image; later
     // cars read the current update. Capture that version in each packet.
     frame.AttachSolidPolys();
-    if(scene.environmentMap && scene.environmentMap->enabled && scene.flow && scene.flow->inGameFlag &&
+    if(scene.environmentMap && scene.environmentMap->enabled && !nativeEmergencySceneQuality && scene.flow && scene.flow->inGameFlag &&
         active(frontend))scene.environmentMap->CreatePrimitives(frame);
     frame.AttachSolidPolys(); // PAL1135B8: remap solid chain only.
     const auto carCaptureStarted=std::chrono::steady_clock::now();
@@ -3560,7 +3562,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     captureCheckpoint(5);
     if(scene.emitRaceGeometry && scene.flow && scene.flow->inGameFlag) {
         frame.AttachFog(views);
-        frame.AttachDepthOfField(views);
+        if(!nativeEmergencySceneQuality)frame.AttachDepthOfField(views);
     }
     frame.AttachBlackAndWhite(views); // PAL113900, before DisplayFilter113A44.
     // PAL1139F0..113A8C: mask alpha precedes destination-alpha history blend.
