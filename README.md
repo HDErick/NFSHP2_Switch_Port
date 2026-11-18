@@ -20,92 +20,6 @@ No game data is included in releases. For manual installation, use
 When migrating the original Switch port, rename the old `switch/NFSHP2/`
 folder to `switch/NFSHP2-Switch/` to retain saves, and replace its NRO.
 
-## Nintendo Switch 2
-
-The Switch 2 build uses **libounce + the Switch 2 Mesa NVK SDK**. It renders
-at **1920×1080 in both handheld and docked modes**, fitting the full frame
-regardless of resolution preferences in a saved profile, with upstream scene quality:
-main and mirror distance **1.0×**, scenery LOD **3.0×**, vehicle LOD **2.5×**,
-and the upstream **125/165** scenery near-detail range. Driver and renderer
-worker threads can use all available application CPU cores. At 120 FPS or Uncapped, the scene profile changes as described below. The
-Switch 1 460.8 MHz GPU profile does not apply to Switch 2.
-
-### Build requirements and command
-
-- devkitPro/devkitA64, CMake 3.24+, GNU Make, Switch tools, and host Python 3
-  with Pillow, as for Switch 1.
-- [ouncebrew ounce-devkit](https://github.com/ouncebrew/ounce-devkit), including
-  libounce and `$DEVKITPRO/libounce/cmake/Switch2.cmake`. This selects the
-  Cortex-A78C CPU, `__SWITCH2__`, and libounce instead of libnx.
-- An **external Switch 2 Horizon Mesa NVK SDK**, with `lib/libmesa_vulkan.a`,
-  `lib/libvulkan.a`, `lib/cmake/Vulkan/VulkanConfig.cmake`, and the matching
-  headers. Set the SDK directory below to its `opt/devkitpro/portlibs/switch2`
-  directory. Graphics drivers/SDKs are not included in this repository.
-- Switch portlibs for the shared C libraries: libpng, zlib, zstd, and Expat.
-
-From the repository root in the devkitPro MSYS2 shell:
-
-```sh
-export DEVKITPRO=/opt/devkitpro
-export HP2_SWITCH2_MESA_SDK=/path/to/external-sdk/opt/devkitpro/portlibs/switch2
-# If the default Python does not have Pillow:
-# export HP2_ICON_PYTHON=/path/to/python
-JOBS=8 bash tools/nx/build-switch2.sh
-```
-
-Output: `build-nx/switch2/NFSHP2-Switch2.nro`, with its matching `.elf` for
-crash symbolization. This is a Release/LTO build with logging and PGO training
-disabled. Switch 1 training data is not used. The project-root `icon.png` and
-`buttons.png` are embedded; author **HDErick**, version **1.0**.
-
-### Install and display settings
-
-Use **PAL PS2 version 1.00 (SLES-50731)**, the same archives as Switch 1:
-
-```text
-sdmc:/switch/NFSHP2-Switch2/
-  NFSHP2-Switch2.nro
-  ZDIR.BIN
-  ZZDATA.BIN
-  config.txt          (created on first boot)
-  Saves/             (created automatically)
-```
-
-Launch with the Switch 2 homebrew environment (kaiHEN/ounce-hbmenu) in full
-application mode. Saves, config, optional `Glyphs/` overrides, and the writable
-Vulkan cache are separate from the Switch 1 installation. No language setting
-is stored: use the PAL language selector each boot.
-
-Default gameplay cap is **60 FPS**, with Show FPS off. Set **Frame Rate** to
-**120 FPS** in Display Options, or use `frame_limit=120` in `config.txt`.
-The Switch 2 menu also offers 75 and 90 FPS; config accepts 1–120, or 0 for
-uncapped presentation. Above 60 FPS (or uncapped), the window requests **120 Hz
-with VRR** through libounce, falling back where the display/system requires
-60 Hz. Both modes keep a 1920×1080 render window. The cap changes presentation;
-PAL simulation and audio retain their existing timing.
-
-**120 FPS and Uncapped use the Switch 1 scene-detail constraints**: scenery LOD
-1.0×, vehicle LOD 1.75×, the 35/50 near-detail range, reduced AI vehicle meshes
-and secondary effects, and 0.5× mirror distance. Main draw distance stays
-**1.0×** and output stays **1080p**. Other caps, including 60, 75, and 90 FPS,
-use the upstream quality values above. Changes apply live at a frame boundary,
-including changes from the pause menu. Actual FPS and 120 Hz
-output need validation on the console and attached display.
-
-The persistent reflection-map fix from upstream `136ac47d` prevents render-only
-frames from blending the same environment image again. Fresh captures between
-logical ticks still update reflections under a cap; the RT/LT clean-scene
-history fix remains enabled. Async shader compilation continues to skip draws
-whose pipelines are unfinished.
-
-The Switch 1 bundled pipeline cache is not embedded in this build because it
-belongs to a different GPU/driver. New pipelines still compile asynchronously
-with unfinished draws skipped; the Switch 2 cache is saved on normal exit to
-`sdmc:/switch/NFSHP2-Switch2/Saves/VulkanPipelineCache.bin`.
-
-Porting references: [OpenBLOPS-NX](https://github.com/HDErick/OpenBLOPS-NX) and
-[SafeHouse Switch 2 PR #65](https://github.com/FridiNaTor1/SafeHouse/pull/65).
-
 ## Nintendo Switch
 
 ### Build requirements
@@ -230,6 +144,92 @@ card `buttons.png` takes precedence over the embedded atlas.
 | 168 | D-pad left | Left stick up/down | Steering wheel | |
 | 196 | Y | Left stick left/right | Pedal | |
 | 224 | A | Right stick up/down | Pedal | |
+
+## Nintendo Switch 2
+
+The Switch 2 build uses **libounce + the Switch 2 Mesa NVK SDK**. It renders
+at **1920×1080 in both handheld and docked modes**, fitting the full frame
+regardless of resolution preferences in a saved profile, with upstream scene quality:
+main and mirror distance **1.0×**, scenery LOD **3.0×**, vehicle LOD **2.5×**,
+and the upstream **125/165** scenery near-detail range. Driver and renderer
+worker threads can use all available application CPU cores. At 120 FPS or Uncapped, the scene profile changes as described below. The
+Switch 1 460.8 MHz GPU profile does not apply to Switch 2.
+
+### Build requirements and command
+
+- devkitPro/devkitA64, CMake 3.24+, GNU Make, Switch tools, and host Python 3
+  with Pillow, as for Switch 1.
+- [ouncebrew ounce-devkit](https://github.com/ouncebrew/ounce-devkit), including
+  libounce and `$DEVKITPRO/libounce/cmake/Switch2.cmake`. This selects the
+  Cortex-A78C CPU, `__SWITCH2__`, and libounce instead of libnx.
+- An **external Switch 2 Horizon Mesa NVK SDK**, with `lib/libmesa_vulkan.a`,
+  `lib/libvulkan.a`, `lib/cmake/Vulkan/VulkanConfig.cmake`, and the matching
+  headers. Set the SDK directory below to its `opt/devkitpro/portlibs/switch2`
+  directory. Graphics drivers/SDKs are not included in this repository.
+- Switch portlibs for the shared C libraries: libpng, zlib, zstd, and Expat.
+
+From the repository root in the devkitPro MSYS2 shell:
+
+```sh
+export DEVKITPRO=/opt/devkitpro
+export HP2_SWITCH2_MESA_SDK=/path/to/external-sdk/opt/devkitpro/portlibs/switch2
+# If the default Python does not have Pillow:
+# export HP2_ICON_PYTHON=/path/to/python
+JOBS=8 bash tools/nx/build-switch2.sh
+```
+
+Output: `build-nx/switch2/NFSHP2-Switch2.nro`, with its matching `.elf` for
+crash symbolization. This is a Release/LTO build with logging and PGO training
+disabled. Switch 1 training data is not used. The project-root `icon.png` and
+`buttons.png` are embedded; author **HDErick**, version **1.0**.
+
+### Install and display settings
+
+Use **PAL PS2 version 1.00 (SLES-50731)**, the same archives as Switch 1:
+
+```text
+sdmc:/switch/NFSHP2-Switch2/
+  NFSHP2-Switch2.nro
+  ZDIR.BIN
+  ZZDATA.BIN
+  config.txt          (created on first boot)
+  Saves/             (created automatically)
+```
+
+Launch with the Switch 2 homebrew environment (kaiHEN/ounce-hbmenu) in full
+application mode. Saves, config, optional `Glyphs/` overrides, and the writable
+Vulkan cache are separate from the Switch 1 installation. No language setting
+is stored: use the PAL language selector each boot.
+
+Default gameplay cap is **60 FPS**, with Show FPS off. Set **Frame Rate** to
+**120 FPS** in Display Options, or use `frame_limit=120` in `config.txt`.
+The Switch 2 menu also offers 75 and 90 FPS; config accepts 1–120, or 0 for
+uncapped presentation. Above 60 FPS (or uncapped), the window requests **120 Hz
+with VRR** through libounce, falling back where the display/system requires
+60 Hz. Both modes keep a 1920×1080 render window. The cap changes presentation;
+PAL simulation and audio retain their existing timing.
+
+**120 FPS and Uncapped use the Switch 1 scene-detail constraints**: scenery LOD
+1.0×, vehicle LOD 1.75×, the 35/50 near-detail range, reduced AI vehicle meshes
+and secondary effects, and 0.5× mirror distance. Main draw distance stays
+**1.0×** and output stays **1080p**. Other caps, including 60, 75, and 90 FPS,
+use the upstream quality values above. Changes apply live at a frame boundary,
+including changes from the pause menu. Actual FPS and 120 Hz
+output need validation on the console and attached display.
+
+The persistent reflection-map fix from upstream `136ac47d` prevents render-only
+frames from blending the same environment image again. Fresh captures between
+logical ticks still update reflections under a cap; the RT/LT clean-scene
+history fix remains enabled. Async shader compilation continues to skip draws
+whose pipelines are unfinished.
+
+The Switch 1 bundled pipeline cache is not embedded in this build because it
+belongs to a different GPU/driver. New pipelines still compile asynchronously
+with unfinished draws skipped; the Switch 2 cache is saved on normal exit to
+`sdmc:/switch/NFSHP2-Switch2/Saves/VulkanPipelineCache.bin`.
+
+Porting references: [OpenBLOPS-NX](https://github.com/HDErick/OpenBLOPS-NX) and
+[SafeHouse Switch 2 PR #65](https://github.com/FridiNaTor1/SafeHouse/pull/65).
 
 ## Windows
 
