@@ -43,6 +43,7 @@ On first boot the port creates `config.txt` beside the running NRO. Defaults:
 frame_limit=30
 show_fps=0
 adaptive_draw_distance=1
+test_low_quality=1
 language=-1
 ```
 
@@ -62,6 +63,13 @@ so loading a profile cannot switch it back to English. `language=-1` follows
 the game/profile until a language is explicitly selected; `0` English, `1`
 French, `2` German, `3` Italian, `4` Spanish and `5` Swedish select one directly.
 
+
+This diagnostic build defaults to `test_low_quality=1`: active gameplay stays
+at **0.2×** draw distance with the emergency scene-quality profile. Recovery
+does not raise quality during the test. This also applies to existing config
+files that do not yet contain the new key. Add `test_low_quality=0` to restore
+the adaptive behavior below. Menus and paused frontend rendering retain normal
+quality. The setting is written with the other display settings on save.
 
 Adaptive distance starts at **0.6×** and drops to **0.4×** after two consecutive
 one-second windows below 28 FPS. At **23 FPS or lower**, one measured window

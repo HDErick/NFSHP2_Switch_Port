@@ -92,6 +92,7 @@ public:
 
     ~SwitchApplicationHost() override
     {
+        FlushSlowFrames();
         hp2::platform::BindSessionSink(nullptr);languageJournal=nullptr;
         hp2::nx::controllerSupport=nullptr;hp2::nx::controllerSupportContext=nullptr;
         StopRumble();
@@ -102,10 +103,11 @@ public:
     {
         const int limit=hp2::nx::gameplayPresentation ? hp2::nx::userSettings.frameLimit:0;
         if(limit!=presentationLimit_.Limit()) {presentationLimit_.SetLimit(limit);presentationLimit_.Reset(FrameTime());}
-        const bool adaptive=hp2::nx::adaptiveGameplay && hp2::nx::userSettings.adaptiveDrawDistance;
-        if(adaptive!=adaptiveActive_) {
-            adaptiveActive_=adaptive;adaptiveDistance_.Reset();lastDistancePresent_={};
-            SetDrawDistance(adaptiveDistance_.Scale());
+        const bool fixedQuality=hp2::nx::adaptiveGameplay && hp2::nx::userSettings.testLowQuality;
+        const bool adaptive=hp2::nx::adaptiveGameplay && hp2::nx::userSettings.adaptiveDrawDistance && !fixedQuality;
+        if(adaptive!=adaptiveActive_ || fixedQuality!=testQualityActive_) {
+            adaptiveActive_=adaptive;testQualityActive_=fixedQuality;adaptiveDistance_.Reset();lastDistancePresent_={};
+            SetDrawDistance(testQualityActive_ ? 0.2f:adaptiveDistance_.Scale());
         }
         if(!appletMainLoop())return false;
         if(appletGetFocusState()!=AppletFocusState_InFocus) {
@@ -117,7 +119,7 @@ public:
             } while(appletGetFocusState()!=AppletFocusState_InFocus);
             ++timingEpoch_;
             refreshClock_={};presentationLimit_.Reset(FrameTime());
-            lastDistancePresent_={};adaptiveDistance_.Reset();SetDrawDistance(0.6f);
+            lastDistancePresent_={};adaptiveDistance_.Reset();SetDrawDistance(testQualityActive_ ? 0.2f:0.6f);
         }
         if(clock_) {
             const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -140,6 +142,14 @@ public:
     }
     void RecordSessionEvent(const char* event,const char* detail) noexcept override
     {
+        if(std::strncmp(event,"render.slow_",12)==0) {
+            // Keep frame logging in RAM until the existing summary flush.
+            // A bounded fallback also handles a run where every frame is slow.
+            if(slowFrameJournal_.size()>65536)FlushSlowFrames();
+            slowFrameJournal_+=event;slowFrameJournal_+=' ';
+            if(detail)slowFrameJournal_+=detail;slowFrameJournal_+='\n';return;
+        }
+        if(std::strcmp(event,"render.detail_window")==0 || std::strncmp(event,"shutdown.",9)==0)FlushSlowFrames();
         log_<<event;
         if(detail)log_<<' '<<detail;
         log_<<std::endl;
@@ -309,12 +319,13 @@ private:
         HidLaControllerSupportResultInfo result{};
         const auto status=hidLaShowControllerSupportForSystem(&result,&argument,false);
         ++timingEpoch_;refreshClock_={};presentationLimit_.Reset(FrameTime());
-        lastDistancePresent_={};adaptiveDistance_.Reset();SetDrawDistance(0.6f);
+        lastDistancePresent_={};adaptiveDistance_.Reset();SetDrawDistance(testQualityActive_ ? 0.2f:0.6f);
         for(std::size_t i=0;i<pads_.size();++i) {padUpdate(&pads_[i]);blockedButtons_[i]=padGetButtons(&pads_[i]);sources_[i]=ReadPhysical(i);}
         const bool ready=R_SUCCEEDED(status) && result.player_count==2 && padIsConnected(&pads_[0]) && padIsConnected(&pads_[1]);
         log_<<"input.controller_support result="<<status<<" players="<<int(result.player_count)<<" accepted="<<ready<<std::endl;
         return ready;
     }
+    void FlushSlowFrames() {if(!slowFrameJournal_.empty()){log_<<slowFrameJournal_;slowFrameJournal_.clear();}}
     void SetDrawDistance(float scale) {
         const bool emergency=scale<0.3f;
         const float mirror=emergency ? 0.25f:0.5f;
@@ -372,7 +383,8 @@ private:
     hp2::NativePresentationClock presentationLimit_;
     hp2::nx::AdaptiveDrawDistance adaptiveDistance_;
     hp2::NativeFrameTiming::Clock::time_point lastDistancePresent_{},captureStarted_{};
-    bool adaptiveActive_{};
+    bool adaptiveActive_{},testQualityActive_{};
+    std::string slowFrameJournal_;
     std::uint64_t timingEpoch_{};
     std::uint64_t captureFrames_{},captureCommands_{},captureInstances_{},captureProjections_{};
     std::uint64_t sceneryPacketHits_{},sceneryPacketMisses_{},sceneryPacketFallbacks_{};

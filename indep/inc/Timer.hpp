@@ -108,8 +108,8 @@ struct NativeDurationStatistics {
 };
 class ScopedNativeDuration final {
 public:
-    explicit ScopedNativeDuration(NativeDurationStatistics& output) noexcept
-        :output_(&output),start_(std::chrono::steady_clock::now()) {}
+    explicit ScopedNativeDuration(NativeDurationStatistics& output,NativeDurationStatistics* secondary=nullptr) noexcept
+        :output_(&output),secondary_(secondary),start_(std::chrono::steady_clock::now()) {}
     ~ScopedNativeDuration() {Finish();}
     ScopedNativeDuration(const ScopedNativeDuration&)=delete;
     ScopedNativeDuration& operator=(const ScopedNativeDuration&)=delete;
@@ -117,11 +117,14 @@ public:
         if(!output_)return;
         const auto elapsed=std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now()-start_).count();
-        output_->Observe(elapsed>0?static_cast<std::uint64_t>(elapsed):0);
+        const auto nanoseconds=elapsed>0?static_cast<std::uint64_t>(elapsed):0;
+        output_->Observe(nanoseconds);
+        if(secondary_ && secondary_!=output_)secondary_->Observe(nanoseconds);
         output_=nullptr;
     }
 private:
     NativeDurationStatistics* output_;
+    NativeDurationStatistics* secondary_;
     std::chrono::steady_clock::time_point start_;
 };
 

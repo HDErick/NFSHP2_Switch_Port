@@ -254,3 +254,35 @@ The per-frame transform table uses an exact-key hash lookup rather than an
 ordered tree. First-use order still determines table offsets; all 22 source
 words (including float bits and shading index) participate in equality.
 No draw order, transform precision, material or LOD changes are made.
+
+
+## Slow-frame diagnostic build
+
+The diagnostic default `test_low_quality=1` holds active racing at 0.2 main
+distance, 0.25 mirror distance and emergency scene quality. It takes priority
+over adaptive recovery, including when an existing config has no new key.
+Set `test_low_quality=0` to resume the ordinary adaptive quality policy.
+
+`render.slow_frame` records each accepted presentation interval over 50 ms.
+Its `frame` is the current CPU/Vulkan submission ID. Timing covers the entire
+interval, including deferred logical updates, discarded captures, the final
+capture, and resource service after submission. World/audio/resource peaks
+are local to that presentation interval, independently of summary resets.
+`tick_ms` includes all application ticks since the previous accepted frame;
+`outside_tick_ms` exposes work or delays between those ticks. `poll_ms`,
+`wait_ms`, `diagnostics_ms` and `tail_ms` help account for the rest. Capture,
+simulation and renderer subfields overlap their parent durations and must not
+be added together as independent costs.
+
+`gpu_frame` explicitly identifies the completed GPU submission whose timestamp
+is available. It can precede the CPU `frame`; no extra GPU wait is introduced.
+`render.slow_gpu` separately reports completed GPU durations over 50 ms, once
+per submission, even when the current CPU presentation interval is shorter.
+
+`distance`, `next_distance`, `emergency` and `quality_changed` show the captured
+quality and any transition around the submission. HOME/controller-applet timing
+epochs clear the interval baseline so user interaction is not reported as a
+game stutter. Rows are buffered in RAM and written with the existing five-second
+summary flush or shutdown; a roughly 64 KiB bound forces a batch write if needed.
+This avoids a file flush for every slow frame. The diagnostic logging duration
+is measured too, including a buffer-full write affecting the next interval.

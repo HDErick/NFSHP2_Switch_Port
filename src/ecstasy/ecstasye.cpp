@@ -3438,10 +3438,12 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
             if(scene.parameters->reverse==1)mask|=4u;
             const auto sceneryStarted=std::chrono::steady_clock::now();
             scenery->Render(view,frame,mask,scene.clock->worldTimeFrames,scene.emitRaceGeometry);
-            if(scene.sceneryCaptureTiming)
-                scene.sceneryCaptureTiming->Observe(static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now()-sceneryStarted).count()));
+            if(scene.sceneryCaptureTiming || scene.sceneryFrameTiming) {
+                const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now()-sceneryStarted).count());
+                if(scene.sceneryCaptureTiming)scene.sceneryCaptureTiming->Observe(elapsed);
+                if(scene.sceneryFrameTiming)scene.sceneryFrameTiming->Observe(elapsed);
+            }
         }
         // PAL113250 follows StuffScenery11321C and precedes the sun and
         // active camera mover. NIS actors retain their actual replay poses.

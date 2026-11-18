@@ -1188,6 +1188,7 @@ struct EcstasySceneBindings {
     bool emitRaceGeometry{true};
     double* carCaptureMilliseconds{};
     platform::NativeDurationStatistics* sceneryCaptureTiming{};
+    platform::NativeDurationStatistics* sceneryFrameTiming{};
     EcstasySceneCaptureProfile* captureProfile{};
 };
 void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame);

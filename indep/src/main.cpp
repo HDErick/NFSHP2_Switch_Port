@@ -240,12 +240,20 @@ struct ApplicationRuntime::Storage {
     std::uint64_t renderGpuProfileSamples{};
     WorldStepProfile worldProfile{};
     platform::NativeDurationStatistics worldTiming,audioTiming,inputTiming,resourceTiming,sceneryTiming;
+    struct SlowFrameCounters {
+        platform::NativeDurationStatistics world,audio,input,resource,scenery,poll,wait,diagnostics,tick;
+        EcstasySceneCaptureProfile capture;
+        double collisionMs{},thinkMs{},effectsMs{};
+    } slowFrame;
+    NativeFrameTiming::Clock::time_point slowLastPresent{};
+    float slowLastDrawDistance{0.6f};
+    std::uint64_t lastSlowGpuFrame{};
     NativeFrameTiming::Clock::time_point lastAcceptedPresent{};
     std::uint64_t presentsOver33ms{},presentsOver50ms{};
     double longestPresentIntervalMs{};
     void ServiceFrameResources()
     {
-        platform::ScopedNativeDuration measure(resourceTiming);
+        platform::ScopedNativeDuration measure(resourceTiming,&slowFrame.resource);
         texturePackRegistry.ServiceReads();resources->Loader().ServiceResourceLoading();
         replayAvailableBytes=host.AvailableMemory();
     }
@@ -616,7 +624,7 @@ struct ApplicationRuntime::Storage {
 #endif
     void GenerateInput(ReplayManager* replay)
     {
-        platform::ScopedNativeDuration measure(inputTiming);
+        platform::ScopedNativeDuration measure(inputTiming,&slowFrame.input);
 #ifdef __SWITCH__
         UpdateSwitchControls();
 #endif
@@ -820,22 +828,28 @@ bool ApplicationRuntime::Tick()
 {
     using namespace frontend;auto& s=*storage_;Require(s.initialized,"Application frame precedes initialization");
     const auto tickStarted=s.host.FrameTime();
+    platform::ScopedNativeDuration slowTickMeasure(s.slowFrame.tick);
     if(!s.frameTimingStarted) {
         s.frameTiming.Reset(tickStarted);s.simulationClock.Reset(tickStarted);
         applicationFrameTiming={};s.frameTimingStarted=true;
         s.presentationTimingEpoch=s.host.PresentationTimingEpoch();s.renderTimingWindowStart=tickStarted;
     }
-    if(!s.host.PollEvents() || s.demo.ExitRequested() || applicationDebugExitRequested)return false;
+    bool eventsReady{};
+    {platform::ScopedNativeDuration measure(s.slowFrame.poll);eventsReady=s.host.PollEvents();}
+    if(!eventsReady || s.demo.ExitRequested() || applicationDebugExitRequested)return false;
     if(s.presentationTimingEpoch!=s.host.PresentationTimingEpoch()) {
         s.presentationTimingEpoch=s.host.PresentationTimingEpoch();
         const auto resumed=s.host.FrameTime();
-        s.lastAcceptedPresent={};
+        s.lastAcceptedPresent={};s.slowLastPresent={};s.slowFrame={};
         s.InvalidatePreparedScene();
         s.frameTiming.Reset(resumed);s.simulationClock.Reset(resumed);applicationFrameTiming={};
     }
+    const float frameDrawDistance=nativeRenderSettings().drawDistanceScale;
+    const bool frameEmergency=nativeEmergencySceneQuality;
     auto observed=s.host.FrameTime();
     if(!s.simulationClock.UpdateDue(observed) && !s.host.PresentationDue(observed)) {
-        s.host.WaitUntil(std::min(s.simulationClock.Deadline(),s.host.PresentationDeadline()));
+        {platform::ScopedNativeDuration measure(s.slowFrame.wait);
+            s.host.WaitUntil(std::min(s.simulationClock.Deadline(),s.host.PresentationDeadline()));}
         return true;
     }
     bool reusedPreparation=false;
@@ -963,8 +977,13 @@ bool ApplicationRuntime::Tick()
                             s.scheduledStepQuanta=static_cast<std::uint32_t>(gameTimeQuantizeElapsed(recordedElapsed));
                         }
                         gameTimeSetWorldElapsed(&s.clock,worldElapsed);s.GenerateInput(replay);
-                        platform::ScopedNativeDuration measure(s.worldTiming);
+                        platform::ScopedNativeDuration measure(s.worldTiming,&s.slowFrame.world);
+                        const double collisionBefore=s.worldProfile.collisionMs,thinkBefore=s.worldProfile.thinkingMs,
+                            effectsBefore=s.worldProfile.effectsMs;
                         const auto stepResult=worldDoTimestep(simulation,worldElapsed,&s.worldProfile);
+                        s.slowFrame.collisionMs+=s.worldProfile.collisionMs-collisionBefore;
+                        s.slowFrame.thinkMs+=s.worldProfile.thinkingMs-thinkBefore;
+                        s.slowFrame.effectsMs+=s.worldProfile.effectsMs-effectsBefore;
                         measure.Finish();
                         if(stepResult!=WORLD_SIMULATION_OK) {
                             // Report actual owner results without replacing a failure
@@ -1076,7 +1095,7 @@ bool ApplicationRuntime::Tick()
             for(auto& screen:s.cameras.screens)if(screen.last)
                 Require(carCinematicAdvanceOwned(screen.last)==CAR_CINEMATIC_OK,"Active camera mover update failed");
             {
-                platform::ScopedNativeDuration measure(s.audioTiming);
+                platform::ScopedNativeDuration measure(s.audioTiming,&s.slowFrame.audio);
                 s.AudioResult(soundUpdate(s.soundBindings,s.trackPhase->Simulation(),s.speechStream,s.profilesOwner,s.parameters,s.flow,&s.joylog),"Original sound frame");
                 if(s.audioOpened)s.AudioResult(s.host.PumpAudio(s.sound),"Physical audio frame");
             }
@@ -1103,7 +1122,7 @@ bool ApplicationRuntime::Tick()
         EcstasySceneBindings scene{s.cameras,s.ui,s.trackPhase.get(),&s.flow,&s.parameters,&s.flow.currentState,&s.clock,&s.frontendFrame,&s.screens};
         scene.environmentMap=s.environmentMap.get();scene.effects=&s.resources->FX();
         scene.carCaptureMilliseconds=&s.renderCarCaptureMs;
-        scene.sceneryCaptureTiming=&s.sceneryTiming;
+        scene.sceneryCaptureTiming=&s.sceneryTiming;scene.sceneryFrameTiming=&s.slowFrame.scenery;
         scene.captureProfile=&s.captureProfile;
         scene.advancePresentation=advancedPresentation;scene.deferPresentationUpdates=true;
         if(advancedPresentation) {
@@ -1118,7 +1137,10 @@ bool ApplicationRuntime::Tick()
         s.RememberPreparedScene();
         if(scene.emitRaceGeometry)s.host.BeginSceneCapture();
         const auto captureStarted=std::chrono::steady_clock::now();
+        const auto previousCapturePhases=s.captureProfile.milliseconds;
         EcstasyDisplayFrame(scene,*s.frame);
+        for(std::size_t i=0;i<previousCapturePhases.size();++i)
+            s.slowFrame.capture.milliseconds[i]+=s.captureProfile.milliseconds[i]-previousCapturePhases[i];
         const auto& shadowCapture=s.frame->CarShadowCaptureMilliseconds();
         for(std::size_t shadow=0;shadow<shadowCapture.size();++shadow)
             s.renderShadowCaptureMs[shadow]+=shadowCapture[shadow];
@@ -1159,8 +1181,8 @@ bool ApplicationRuntime::Tick()
         if(advancedPresentation) {
             s.ServiceFrameResources();
         }
-        if(!simulationBehind)
-            s.host.WaitUntil(std::min(s.simulationClock.Deadline(),s.host.PresentationDeadline()));
+        if(!simulationBehind) {platform::ScopedNativeDuration measure(s.slowFrame.wait);
+            s.host.WaitUntil(std::min(s.simulationClock.Deadline(),s.host.PresentationDeadline()));}
         return !s.demo.ExitRequested();
     }
     if(!reusedPreparation) {
@@ -1190,6 +1212,7 @@ bool ApplicationRuntime::Tick()
         applicationPreviousCpuFrameRate=rate(updateMs+renderTiming.gatherMilliseconds+renderTiming.recordSubmitMilliseconds);
         applicationPreviousGpuFrameRate=applicationGpuTimingAvailable?rate(renderTiming.gpuMilliseconds):0.0f;
     }
+    const auto diagnosticsStarted=s.host.FrameTime();
     if(hasRenderTiming) {
         ++s.renderTimedFrames;s.renderUpdateMs+=updateMs;
         s.renderCaptureMs+=captureMs;s.renderSealMs+=sealMs;
@@ -1392,6 +1415,9 @@ bool ApplicationRuntime::Tick()
         }
     }
 
+    s.slowFrame.diagnostics.Observe(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        s.host.FrameTime()-diagnosticsStarted).count()));
+    const auto tailStarted=s.host.FrameTime();
     Require(s.frame->State()==EcstasyFrame::Phase::Complete,"Physical presenter did not retire the CPU frame capture");
     if(advancedPresentation) {
         s.ServiceFrameResources();
@@ -1403,10 +1429,70 @@ bool ApplicationRuntime::Tick()
     if(s.presentationTimingEpoch!=s.host.PresentationTimingEpoch()) {
         // Reset only on a physical window-resume epoch, never an active stall.
         s.presentationTimingEpoch=s.host.PresentationTimingEpoch();
+        s.slowLastPresent={};s.slowFrame={};
         s.InvalidatePreparedScene();
         s.frameTiming.Reset(completed);s.simulationClock.Reset(completed);applicationFrameTiming={};
     } else if(s.frameTiming.Observe(completed,hasRenderTiming?&renderTiming:nullptr,updateMs)) {
         applicationFrameTiming=s.frameTiming.Read();
+    }
+    const auto slowCompleted=s.host.FrameTime();
+    const double tailMilliseconds=std::chrono::duration<double,std::milli>(slowCompleted-tailStarted).count();
+    slowTickMeasure.Finish();
+    if(hasRenderTiming && renderTiming.presentAccepted) {
+        const double interval=s.slowLastPresent==NativeFrameTiming::Clock::time_point{} ? 0.0:
+            std::chrono::duration<double,std::milli>(slowCompleted-s.slowLastPresent).count();
+        char slowDetail[2304]{};
+        const auto ms=[](const platform::NativeDurationStatistics& value){return static_cast<double>(value.totalNanoseconds)*1.0e-6;};
+        const auto peak=[](const platform::NativeDurationStatistics& value){return static_cast<double>(value.maximumNanoseconds)*1.0e-6;};
+        const auto& slow=s.slowFrame;const auto& profile=renderTiming.renderProfile;
+        const auto& phases=profile.submitPhaseMilliseconds;
+        const bool qualityChanged=frameDrawDistance!=s.slowLastDrawDistance || frameDrawDistance!=nativeRenderSettings().drawDistanceScale;
+        if(interval>50.0) {
+            std::snprintf(slowDetail,sizeof(slowDetail),
+                "frame=%llu loop=%d scenario=%d in_game=%d interval_ms=%.3f tick_ms=%.3f outside_tick_ms=%.3f "
+                "update_ms=%.3f capture_ms=%.3f seal_ms=%.3f logical_updates=%llu captures=%llu "
+                "world_ms=%.3f collision_ms=%.3f think_ms=%.3f effects_ms=%.3f world_peak_ms=%.3f "
+                "audio_ms=%.3f audio_peak_ms=%.3f input_ms=%.3f resource_ms=%.3f resource_peak_ms=%.3f scenery_ms=%.3f "
+                "capture_world_ms=%.3f capture_solids_ms=%.3f capture_particles_ms=%.3f capture_hud_ms=%.3f "
+                "gather_ms=%.3f validate_ms=%.3f vertex_jobs_ms=%.3f indices_ms=%.3f "
+                "submit_ms=%.3f pipeline_ms=%.3f record_ms=%.3f fence_ms=%.3f present_ms=%.3f retire_ms=%.3f "
+                "preflight_ms=%.3f acquire_ms=%.3f reclaim_ms=%.3f textures_ms=%.3f targets_ms=%.3f "
+                "upload_ms=%.3f draw_plan_ms=%.3f postprocess_ms=%.3f finalize_ms=%.3f "
+                "poll_ms=%.3f wait_ms=%.3f diagnostics_ms=%.3f tail_ms=%.3f "
+                "gpu_frame=%llu gpu_ms=%.3f gpu_valid=%d compiled=%llu skipped=%llu "
+                "distance=%.2f next_distance=%.2f emergency=%d quality_changed=%d",
+                static_cast<unsigned long long>(renderTiming.submittedFrame),s.clock.worldLoopCounter,
+                s.parameters.selectedScenario,s.flow.inGameFlag,interval,ms(slow.tick),std::max(0.0,interval-ms(slow.tick)),
+                updateMs,captureMs,sealMs,static_cast<unsigned long long>(logicalUpdates),static_cast<unsigned long long>(sceneCaptures),
+                ms(slow.world),slow.collisionMs,slow.thinkMs,slow.effectsMs,peak(slow.world),
+                ms(slow.audio),peak(slow.audio),ms(slow.input),ms(slow.resource),peak(slow.resource),ms(slow.scenery),
+                slow.capture.milliseconds[2],slow.capture.milliseconds[4],slow.capture.milliseconds[3],slow.capture.milliseconds[7],
+                renderTiming.gatherMilliseconds,profile.gatherValidationMilliseconds,profile.gatherVertexJobsMilliseconds,profile.gatherIndicesMilliseconds,
+                renderTiming.recordSubmitMilliseconds,profile.pipelineLookupMilliseconds,profile.recordSceneMilliseconds,
+                renderTiming.fenceWaitMilliseconds,renderTiming.presentMilliseconds,profile.frameRetirementMilliseconds,
+                phases[0],phases[1],phases[2],phases[3],phases[4],phases[5],phases[6],phases[7],phases[8],
+                ms(slow.poll),ms(slow.wait),ms(slow.diagnostics),tailMilliseconds,
+                static_cast<unsigned long long>(renderTiming.completedGpuFrame),renderTiming.gpuMilliseconds,renderTiming.gpuTimeAvailable,
+                static_cast<unsigned long long>(renderTiming.pipelineCreations),static_cast<unsigned long long>(renderTiming.pendingPipelineDraws),
+                frameDrawDistance,nativeRenderSettings().drawDistanceScale,frameEmergency,qualityChanged);
+        }
+        // A previous frame's GPU duration is available only after its fence.
+        // Keep that submission ID explicit; never label it as this CPU frame.
+        char gpuDetail[192]{};
+        if(renderTiming.gpuTimeAvailable && renderTiming.gpuMilliseconds>50.0 && renderTiming.completedGpuFrame!=s.lastSlowGpuFrame) {
+            std::snprintf(gpuDetail,sizeof(gpuDetail),"frame=%llu gpu_ms=%.3f observed_at_frame=%llu",
+                static_cast<unsigned long long>(renderTiming.completedGpuFrame),renderTiming.gpuMilliseconds,
+                static_cast<unsigned long long>(renderTiming.submittedFrame));
+            s.lastSlowGpuFrame=renderTiming.completedGpuFrame;
+        }
+        s.slowFrame={};s.slowLastPresent=slowCompleted;s.slowLastDrawDistance=frameDrawDistance;
+        // Logging cost belongs to the following physical interval. The Switch
+        // host buffers these records until an existing summary flush.
+        if(slowDetail[0] || gpuDetail[0]) {
+            platform::ScopedNativeDuration measure(s.slowFrame.diagnostics);
+            if(slowDetail[0])s.host.RecordSessionEvent("render.slow_frame",slowDetail);
+            if(gpuDetail[0])s.host.RecordSessionEvent("render.slow_gpu",gpuDetail);
+        }
     }
     return !s.demo.ExitRequested();
 }
