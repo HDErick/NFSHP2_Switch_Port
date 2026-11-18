@@ -107,7 +107,7 @@ public:
         const bool adaptive=hp2::nx::adaptiveGameplay && hp2::nx::userSettings.adaptiveDrawDistance && !fixedQuality;
         if(adaptive!=adaptiveActive_ || fixedQuality!=testQualityActive_) {
             adaptiveActive_=adaptive;testQualityActive_=fixedQuality;adaptiveDistance_.Reset();lastDistancePresent_={};
-            SetDrawDistance(testQualityActive_ ? 0.2f:adaptiveDistance_.Scale());
+            SetDrawDistance(testQualityActive_ ? hp2::nx::fixedTestDrawDistance:adaptiveDistance_.Scale());
         }
         if(!appletMainLoop())return false;
         if(appletGetFocusState()!=AppletFocusState_InFocus) {
@@ -119,7 +119,7 @@ public:
             } while(appletGetFocusState()!=AppletFocusState_InFocus);
             ++timingEpoch_;
             refreshClock_={};presentationLimit_.Reset(FrameTime());
-            lastDistancePresent_={};adaptiveDistance_.Reset();SetDrawDistance(testQualityActive_ ? 0.2f:0.6f);
+            lastDistancePresent_={};adaptiveDistance_.Reset();SetDrawDistance(testQualityActive_ ? hp2::nx::fixedTestDrawDistance:0.6f);
         }
         if(clock_) {
             const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -319,7 +319,7 @@ private:
         HidLaControllerSupportResultInfo result{};
         const auto status=hidLaShowControllerSupportForSystem(&result,&argument,false);
         ++timingEpoch_;refreshClock_={};presentationLimit_.Reset(FrameTime());
-        lastDistancePresent_={};adaptiveDistance_.Reset();SetDrawDistance(testQualityActive_ ? 0.2f:0.6f);
+        lastDistancePresent_={};adaptiveDistance_.Reset();SetDrawDistance(testQualityActive_ ? hp2::nx::fixedTestDrawDistance:0.6f);
         for(std::size_t i=0;i<pads_.size();++i) {padUpdate(&pads_[i]);blockedButtons_[i]=padGetButtons(&pads_[i]);sources_[i]=ReadPhysical(i);}
         const bool ready=R_SUCCEEDED(status) && result.player_count==2 && padIsConnected(&pads_[0]) && padIsConnected(&pads_[1]);
         log_<<"input.controller_support result="<<status<<" players="<<int(result.player_count)<<" accepted="<<ready<<std::endl;

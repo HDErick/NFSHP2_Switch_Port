@@ -65,8 +65,8 @@ French, `2` German, `3` Italian, `4` Spanish and `5` Swedish select one directly
 
 
 This diagnostic build defaults to `test_low_quality=1`: active gameplay stays
-at **0.2×** draw distance with the emergency scene-quality profile. Recovery
-does not raise quality during the test. This also applies to existing config
+at **0.3×** draw distance with normal scene quality and **0.5×** mirror distance.
+Adaptive quality changes are suspended during the test. This also applies to existing config
 files that do not yet contain the new key. Add `test_low_quality=0` to restore
 the adaptive behavior below. Menus and paused frontend rendering retain normal
 quality. The setting is written with the other display settings on save.

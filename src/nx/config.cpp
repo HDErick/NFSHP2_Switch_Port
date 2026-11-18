@@ -40,7 +40,7 @@ bool SaveUserSettings() noexcept {
             <<"show_fps="<<userSettings.showFps<<"\n"
             <<"# Scene quality: 0.6 normally, 0.4 under load, emergency 0.2 at 23 FPS.\n"
             <<"adaptive_draw_distance="<<userSettings.adaptiveDrawDistance<<"\n"
-            <<"# Diagnostic baseline: 1 holds gameplay at emergency 0.2 quality; 0 restores adaptive behavior.\n"
+            <<"# Diagnostic baseline: 1 holds 0.3 draw distance with normal scene quality; 0 restores adaptive behavior.\n"
             <<"test_low_quality="<<userSettings.testLowQuality<<"\n";
         file.flush();const bool good=file.good();file.close();
         if(!good || file.fail())throw std::runtime_error("Could not write Switch config");

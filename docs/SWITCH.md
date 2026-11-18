@@ -258,9 +258,10 @@ No draw order, transform precision, material or LOD changes are made.
 
 ## Slow-frame diagnostic build
 
-The diagnostic default `test_low_quality=1` holds active racing at 0.2 main
-distance, 0.25 mirror distance and emergency scene quality. It takes priority
-over adaptive recovery, including when an existing config has no new key.
+The diagnostic default `test_low_quality=1` holds active racing at 0.3 main
+distance, 0.5 mirror distance and normal scene quality. The existing config key
+is retained for compatibility. Adaptive quality changes are suspended during
+this test, including when an existing config has no new key.
 Set `test_low_quality=0` to resume the ordinary adaptive quality policy.
 
 `render.slow_frame` records each accepted presentation interval over 50 ms.

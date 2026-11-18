@@ -12,8 +12,9 @@ struct UserSettings {
     int frameLimit{30}; // 0 = uncapped, otherwise 1..60.
     bool showFps{};
     bool adaptiveDrawDistance{true};
-    bool testLowQuality{true}; // Temporary fixed 0.2 scene-quality test baseline.
+    bool testLowQuality{true}; // Fixed-distance test override; retains the existing config key.
 };
+inline constexpr float fixedTestDrawDistance=0.3f;
 inline UserSettings userSettings;
 inline int PreferredLanguage(int profileLanguage) noexcept {
     return userSettings.language>=0 ? userSettings.language:profileLanguage;
