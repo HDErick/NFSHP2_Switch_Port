@@ -1219,6 +1219,9 @@ bool ApplicationRuntime::Tick()
         s.renderProfile.gatherVertexJobsMilliseconds+=profile.gatherVertexJobsMilliseconds;
         s.renderProfile.gatherIndicesMilliseconds+=profile.gatherIndicesMilliseconds;
         s.renderProfile.frameRetirementMilliseconds+=profile.frameRetirementMilliseconds;
+        s.renderProfile.historyFrames+=profile.historyFrames;s.renderProfile.historyCopies+=profile.historyCopies;
+        s.renderProfile.historySeeds+=profile.historySeeds;
+        s.renderProfile.historyFramesWithoutTick+=profile.historyFramesWithoutTick;
         for(std::size_t shadow=0;shadow<profile.shadowStrips.size();++shadow) {
             s.renderProfile.shadowStrips[shadow]+=profile.shadowStrips[shadow];
             s.renderProfile.shadowTriangles[shadow]+=profile.shadowTriangles[shadow];
@@ -1356,6 +1359,14 @@ bool ApplicationRuntime::Tick()
                 cpu.gatherVertexJobsMilliseconds/count,cpu.gatherIndicesMilliseconds/count,
                 cpu.coldVertexJobs/count,cpu.coldVertices/count);
             s.host.RecordSessionEvent("render.gather_detail",detail);
+            if(cpu.historyFrames) {
+                std::snprintf(detail,sizeof(detail),
+                    "frames=%llu clean_copies=%llu seeds=%llu frames_without_tick=%llu source=pre_blur_scene",
+                    static_cast<unsigned long long>(cpu.historyFrames),static_cast<unsigned long long>(cpu.historyCopies),
+                    static_cast<unsigned long long>(cpu.historySeeds),
+                    static_cast<unsigned long long>(cpu.historyFramesWithoutTick));
+                s.host.RecordSessionEvent("render.history_window",detail);
+            }
             if(s.renderGpuProfileSamples) {
                 const auto samples=static_cast<double>(s.renderGpuProfileSamples);
                 const auto& gpu=s.renderGpuProfile;

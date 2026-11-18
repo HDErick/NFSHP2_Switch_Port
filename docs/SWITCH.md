@@ -192,13 +192,20 @@ frame. Cop counts, cops within 150 metres, particles and emitters are averages
 per simulation step. These complement the existing collision, capture, Gather,
 audio and GPU timings without per-particle logging.
 
-RT scout and LT orbit camera history is captured after scene effects and before
-the HUD, including the mirror overlay, track map and FPS display. On entry,
-the first historical blend is omitted until a clean scene has been captured.
-Normal frames without a history reader do not copy or split the scene pass;
-repeated prepared submissions do not advance history. FXAA retains its separate
-feedback image. Console testing is needed to confirm the visible camera result
-and measure the chase FPS change.
+RT scout and LT orbit camera history uses the clean scene immediately before
+the radial mask/history blend. A current-scene snapshot is taken there, and is
+published to previous-frame history after the old history has been sampled.
+Neither the HUD nor the history-composited result enters the next snapshot;
+this prevents opaque blur-mask regions from retaining the entry frame forever.
+The first historical blend on entry is omitted until that clean source exists.
+History refreshes on every newly captured submitted image, including images
+captured between logical simulation ticks at the 30 FPS cap. Active display
+history rejects prepared-frame replay so its temporal input cannot become stale.
+Normal frames without a history reader do not copy or split the scene pass.
+FXAA reuses feedback only after history publication. `render.history_window`
+reports active frames, clean copies, entry seeds and captures without a logical
+tick; active fresh frames and clean copies should match. The visible RT/LT
+result still needs console validation.
 
 
 ## Renderer diagnostic summaries
@@ -231,3 +238,9 @@ These are CPU wall times. Swapchain acquisition and driver calls can include
 blocking, so the GPU timestamps and explicit fence-wait metric remain necessary
 when interpreting them. No extra GPU waits, per-draw log writes or game options
 are introduced. Existing resolution, clocks, LOD and rendering behavior apply.
+
+
+The per-frame transform table uses an exact-key hash lookup rather than an
+ordered tree. First-use order still determines table offsets; all 22 source
+words (including float bits and shading index) participate in equality.
+No draw order, transform precision, material or LOD changes are made.

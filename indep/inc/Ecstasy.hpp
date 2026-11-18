@@ -777,7 +777,7 @@ struct EcstasyNativeFeedbackRegion {
 EcstasyNativeFeedbackRegion ecstasyNativeFeedbackRegion(const EcstasyRenderTarget& target,
     std::uint32_t width,std::uint32_t height,std::uint32_t logicalWidth,std::uint32_t logicalHeight,
     const std::array<double,2>& translation);
-enum class EcstasyDrawKind { FlailerPolygon,SolidStrip,WorldPolygon,RenderTargetPolygon,ParticleGroup,MirrorOverlayPolygon,WorldStrip,RenderTargetStrip,SolidReflectionStrip,ScreenFilterPolygon,SolidSpecularStrip,ScreenPolygon,FogPass,FocusMaskPass,DepthOfFieldPass,BlackAndWhitePass,DestinationFilterPass,SceneHistoryBoundary };
+enum class EcstasyDrawKind { FlailerPolygon,SolidStrip,WorldPolygon,RenderTargetPolygon,ParticleGroup,MirrorOverlayPolygon,WorldStrip,RenderTargetStrip,SolidReflectionStrip,ScreenFilterPolygon,SolidSpecularStrip,ScreenPolygon,FogPass,FocusMaskPass,DepthOfFieldPass,BlackAndWhitePass,DestinationFilterPass,SceneHistoryBoundary,SceneHistorySource };
 // Explicit native presentation policy, not a PS2 packet/layout field.
 // Ordinary authored HUD retains its established edge positions. Only an
 // identified layout owner can request a centred proportional canvas.
@@ -969,7 +969,7 @@ public:
     void AttachBlackAndWhite(const CarCinematicServices& views);
     void DisplayFilter(const CarCinematicServices& views,ResourceRegistry& resources);
     void DisplayBlendPrevious(const CarCinematicServices& views);
-    void MarkSceneHistoryBoundary(const EcstasyRenderTarget& display);
+    void MarkSceneHistoryBoundary(const EcstasyRenderTarget& display,bool source=false);
     // PAL1138AC..1138D4 / eAttachFog119768: current scene depth, before
     // history filters and HUD. These palettes contain values, no resources.
     void AttachFog(const CarCinematicServices& views);
@@ -1210,6 +1210,7 @@ struct EcstasyVulkanRenderProfile {
     std::uint64_t gatherCategorySamples{},coldVertexJobs{},coldVertices{};
     double gatherVertexJobsMilliseconds{},gatherIndicesMilliseconds{};
     double frameRetirementMilliseconds{}; // After the existing record/submit interval.
+    std::uint64_t historyFrames{},historyCopies{},historySeeds{},historyFramesWithoutTick{};
 
     double gatherValidationMilliseconds{},gatherFinishMilliseconds{};
     double pipelineLookupMilliseconds{},recordSceneMilliseconds{},queueSubmitMilliseconds{};

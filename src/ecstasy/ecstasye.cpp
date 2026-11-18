@@ -3566,6 +3566,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     // PAL1139F0..113A8C: mask alpha precedes destination-alpha history blend.
     frame.SetZWriteState(0);
     if(resources)frame.DisplayFilter(views,*resources);
+    if(frontend.target)frame.MarkSceneHistoryBoundary(*frontend.target,true);
     frame.DisplayRadialBlur(views);
     frame.DisplayBlendPrevious(views);
     frame.SetZWriteState(1);
@@ -3628,12 +3629,12 @@ void EcstasyFrame::RetireStripAfterCompletion(frontend::FlailerStrip& strip)
     retainedStrips_.push_back(&strip);
 }
 
-void EcstasyFrame::MarkSceneHistoryBoundary(const EcstasyRenderTarget& display)
+void EcstasyFrame::MarkSceneHistoryBoundary(const EcstasyRenderTarget& display,bool source)
 {
     Require(phase_==Phase::Building && display.id>=0 && display.id<7,
         "Scene history boundary lost its display target");
     AttachAlphaPolys();
-    EcstasyDrawCommand command;command.kind=EcstasyDrawKind::SceneHistoryBoundary;
+    EcstasyDrawCommand command;command.kind=source ? EcstasyDrawKind::SceneHistorySource:EcstasyDrawKind::SceneHistoryBoundary;
     command.target=&display;commands_.push_back(command);
     pendingAlphaBegin_=commands_.size();
 }
@@ -6356,7 +6357,7 @@ void CollectNativeTextureReferences(std::vector<VkNativeTextureKey>& referenced,
     for(const auto& draw:commands) {
         if(draw.kind==EcstasyDrawKind::FogPass || draw.kind==EcstasyDrawKind::FocusMaskPass ||
             draw.kind==EcstasyDrawKind::DepthOfFieldPass || draw.kind==EcstasyDrawKind::BlackAndWhitePass ||
-            draw.kind==EcstasyDrawKind::SceneHistoryBoundary)continue;
+            draw.kind==EcstasyDrawKind::SceneHistoryBoundary || draw.kind==EcstasyDrawKind::SceneHistorySource)continue;
         if(draw.sampledTarget) {
             Require(!draw.texture,"Target-sampled draw has conflicting image owners");continue;
         }
@@ -6535,6 +6536,14 @@ public:
         case EcstasyDrawKind::MirrorOverlayPolygon:case EcstasyDrawKind::ScreenPolygon:return 4;
         default:return 5;
         }
+    }
+};
+
+struct VkNativeTransformKeyHash {
+    std::size_t operator()(const std::array<std::uint32_t,22>& key) const noexcept {
+        std::size_t hash=1469598103934665603ull;
+        for(const auto word:key)hash=(hash^word)*1099511628211ull;
+        return hash;
     }
 };
 
@@ -6863,7 +6872,7 @@ struct EcstasyVulkanDevice::Storage {
     // strip, TextureInfo or gameplay view is read by a repeated submission.
     // Depth destinations retain their established shared readback lifetime.
     bool CanRenderPrepared() const noexcept {
-        if(!preparedFrame.valid || !hasFrame)return false;
+        if(!preparedFrame.valid || !hasFrame || preparedFrame.historyReaders.display)return false;
         for(const auto& input:preparedFrame.depthInputs) {
             std::uint32_t visibleSamples{};
             if(!input.destination || !input.visibleSamplesValid ||
@@ -8171,7 +8180,8 @@ void EcstasyVulkanDevice::Storage::CopyHistory(std::int32_t id,VkImage current,b
     auto& target=renderedTargets.at(id);
     Require(target.previous.image,"History reader has no retained GPU image");
     if(readableLayout)Barrier(current,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK_ACCESS_SHADER_READ_BIT,VK_ACCESS_TRANSFER_READ_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT);
     Barrier(target.previous.image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         VK_ACCESS_SHADER_READ_BIT,VK_ACCESS_TRANSFER_WRITE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT);
     VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.dstSubresource=copy.srcSubresource;
@@ -8189,7 +8199,7 @@ void EcstasyVulkanDevice::Storage::CreateFeedback(std::int32_t id,const VkDrawTe
     if(!target.feedback.image) {
         try {
             CreateImage(target.feedback,target.width,target.height,VK_FORMAT_R8G8B8A8_UNORM,
-                VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_COLOR_BIT);
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_COLOR_BIT);
             const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,6};
             VkDescriptorPoolCreateInfo pool{};pool.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
             pool.maxSets=2;pool.poolSizeCount=1;pool.pPoolSizes=&size;
@@ -8830,10 +8840,11 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     NativeGatherCategoryTimer categoryTimer(sampleCategories ? &profile:nullptr);
     for (const auto& draw:frame.Commands()) {
         categoryTimer.Enter(draw);
-        if(draw.kind==EcstasyDrawKind::SceneHistoryBoundary) {
+        if(draw.kind==EcstasyDrawKind::SceneHistoryBoundary || draw.kind==EcstasyDrawKind::SceneHistorySource) {
             // Ordinary racing retains its single pass and does no history copy.
             if(preparedFrame.historyReaders.display) {
-                VkDrawBatch marker;marker.target=0;marker.textureFunction=11;
+                VkDrawBatch marker;marker.target=0;
+                marker.textureFunction=draw.kind==EcstasyDrawKind::SceneHistorySource ? 12:11;
                 batches.push_back(marker);
             }
             continue;
@@ -9671,7 +9682,15 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     // Keep the old path only for callers without an explicit scene boundary.
     const auto historyReaders=preparedFrame.historyReaders;
     const bool advancesPresentation=frame && frame->AdvancesPresentation();
-    if(historyReaders.display && !preparedFrame.sceneHistoryBoundary && hasFrame && advancesPresentation) {
+    // Display history follows newly rendered images, independently of the
+    // 60Hz logical clock. A capped presentation often captures between ticks.
+    const bool updatesDisplayHistory=frame!=nullptr;
+    if(historyReaders.display && updatesDisplayHistory) {
+        statistics.renderProfile.historyFrames=1;
+        statistics.renderProfile.historyFramesWithoutTick=advancesPresentation ? 0:1;
+        statistics.renderProfile.historySeeds=preparedFrame.useDisplayHistory ? 0:1;
+    }
+    if(historyReaders.display && !preparedFrame.sceneHistoryBoundary && hasFrame && updatesDisplayHistory) {
         CopyHistory(0,color.image,false);
 
     }
@@ -9703,6 +9722,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         const auto* source=batch.textureFunction==10 ? &textures.at(batch.texture):nullptr;
         CreateFeedback(batch.target,source);
     }
+    if(historyReaders.display && preparedFrame.sceneHistoryBoundary)CreateFeedback(0,nullptr);
     VkDrawBatch antialiasing;
     if(options.antialiasing==EcstasyAntialiasing::Fxaa) {
         CreateFeedback(0,nullptr);
@@ -9851,7 +9871,8 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         // Exact float-bit keys retain the producer's matrix and projected Q. This
         // table is frame-owned and shares the already fenced native data buffer.
         // Resident vertex/cache bytes never contain these per-frame table offsets.
-        std::map<std::array<std::uint32_t,22>,std::uint32_t> streamedTransforms;
+        std::unordered_map<std::array<std::uint32_t,22>,std::uint32_t,VkNativeTransformKeyHash> streamedTransforms;
+        streamedTransforms.reserve(std::min<std::size_t>(batches.size(),1024));
         std::array<std::uint32_t,22> lastTransformKey{};
         std::uint32_t lastTransformIndex=UINT32_MAX;
         const auto captureTransform=[&](const VkDrawBatch& batch) {
@@ -9977,7 +9998,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
             const auto& batch=*packets[index];
             // On effect entry there is no HUD-free previous scene yet. Seed
             // it below and omit just the first historical blend, not the effect.
-            if(batch.textureFunction==11 || (batch.sampledPreviousFrame && batch.sampledTarget==0 &&
+            if(batch.textureFunction==11 || batch.textureFunction==12 || (batch.sampledPreviousFrame && batch.sampledTarget==0 &&
                 !preparedFrame.useDisplayHistory)) {preparedPipelines.push_back(VK_NULL_HANDLE);continue;}
             const bool sample=fogPlan.present && fogPlan.direct && index>=fogPlan.first && index<=fogPlan.last;
             VkPipeline pipeline{};
@@ -10179,20 +10200,29 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
             recordedPass.segments.push_back(std::move(segment));
             statistics.commandRecordingChunks+=static_cast<std::uint32_t>(chunks);
         };
+        bool capturedCleanScene=false;
         const auto boundary=[&](std::size_t index) {
             const auto& batch=*packets[index];
             return (samplingDepth && index>fogPlan.last) ||
                 (batch.feedbackGroup && feedbackGroup!=batch.feedbackGroup) ||
                 ((batch.textureFunction==5 || batch.textureFunction==6) && !copiedFogDepth) ||
-                batch.textureFunction==8 || batch.textureFunction==11;
+                batch.textureFunction==8 || batch.textureFunction==11 || batch.textureFunction==12;
         };
         for(std::size_t packetIndex=0;packetIndex<packets.size();) {
             const auto& batch=*packets[packetIndex];
-            if(batch.textureFunction==11) {
+            if(batch.textureFunction==11 || batch.textureFunction==12) {
                 Require(id==0,"Scene history boundary targets an offscreen image");
                 endPass();
                 if(samplingDepth) {SetFogDepthReadable(false);samplingDepth=false;}
-                if(advancesPresentation)CopyHistory(0,color.image,false);
+                if(batch.textureFunction==12) {
+                    CopyFeedback(0);capturedCleanScene=true;
+                } else if(updatesDisplayHistory) {
+                    Require(capturedCleanScene,"Camera history has no clean pre-blur scene");
+                    // Publish the raw scene, not the history-composited output:
+                    // fully opaque mask areas must never feed themselves back.
+                    CopyHistory(0,renderedTargets.at(0).feedback.image,true);
+                    ++statistics.renderProfile.historyCopies;
+                }
                 ++packetIndex;continue;
             }
             if(samplingDepth && packetIndex>fogPlan.last) {
@@ -10385,7 +10415,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     // World/Frontend to prepare the next frame while this GPU frame runs.
     // Actual *GPU* buffer/texture retirement is still fence-gated above.
     if(frame)frame->Complete();
-    if(advancesPresentation)displaySceneHistoryValid=
+    if(updatesDisplayHistory)displaySceneHistoryValid=
         preparedFrame.sceneHistoryBoundary && historyReaders.display;
     hasFrame=true;preparedFrame.valid=true;
     recordedBuffers=RecordedBufferHandles();recordedFrameDescriptor=frameDescriptor;
