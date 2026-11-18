@@ -97,6 +97,11 @@ void gameTimerPrintRounded(const int32_t* ticks,char* output,float resolution,
 #include <chrono>
 #include <cstdint>
 namespace hp2::platform {
+#ifdef HP2_DISABLE_DIAGNOSTICS
+inline constexpr bool nativeDiagnosticsEnabled=false;
+#else
+inline constexpr bool nativeDiagnosticsEnabled=true;
+#endif
 // Bounded native performance observations only. No source timer, frame,
 // readiness or presentation state is advanced by this monotonic measurement.
 struct NativeDurationStatistics {

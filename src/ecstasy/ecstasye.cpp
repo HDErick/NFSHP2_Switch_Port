@@ -8598,7 +8598,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     using Clock=std::chrono::steady_clock;
     auto& profile=statistics.renderProfile;
     profile.shadowStrips={};profile.shadowTriangles={};
-    const bool sampleShadowGather=nextSubmission%16u==0;
+    const bool sampleShadowGather=platform::nativeDiagnosticsEnabled && nextSubmission%16u==0;
     profile.shadowGatherSamples=sampleShadowGather ? 1u:0u;
     profile.shadowGatherMilliseconds={};
     const auto nativeWorkers=NativeSceneEffectiveHardwareConcurrency();
@@ -8839,7 +8839,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         if(batch.count)appendBatch(batch);
         return true;
     };
-    const bool sampleCategories=nextSubmission%32u==0;
+    const bool sampleCategories=platform::nativeDiagnosticsEnabled && nextSubmission%32u==0;
     if(sampleCategories)++profile.gatherCategorySamples;
     NativeGatherCategoryTimer categoryTimer(sampleCategories ? &profile:nullptr);
     for (const auto& draw:frame.Commands()) {
@@ -9673,7 +9673,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkRequired(vkBeginCommandBuffer(commands,&begin),"vkBeginCommandBuffer");
     // Sparse pass timestamps limit command and synchronization overhead.
-    const bool sampleGpuTargets=timestampQueries && (nextSubmission%16u==0);
+    const bool sampleGpuTargets=platform::nativeDiagnosticsEnabled && timestampQueries && (nextSubmission%16u==0);
     std::uint32_t timestampCount=2;
     if(timestampQueries) {
         vkCmdResetQueryPool(commands,timestampQueries,0,sampleGpuTargets ? TimestampQueryCapacity:2);
@@ -10377,7 +10377,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
 
     const auto frameRetirementStarted=Clock::now();
     const auto journalTicks=platform::TicksNow();
-    if(!journalWorkReported || journalTicks-journalWorkTicks>=platform::kTickerFrequency*5u) {
+    if(platform::nativeDiagnosticsEnabled && (!journalWorkReported || journalTicks-journalWorkTicks>=platform::kTickerFrequency*5u)) {
         journalWorkReported=true;journalWorkTicks=journalTicks;
         std::uint64_t mainTriangles=0,mirrorTriangles=0,otherTriangles=0,lineIndices=0;
         std::size_t mainBatches=0,mirrorBatches=0,otherBatches=0;

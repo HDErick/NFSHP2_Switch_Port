@@ -1,6 +1,7 @@
 #include <switch.h>
 
 #include "audio.hpp"
+#include "async_log.hpp"
 #include "control_layout.hpp"
 #include "controller_session.hpp"
 #include "config.hpp"
@@ -33,7 +34,7 @@ namespace {
 constexpr int width=1280;
 constexpr int height=720;
 constexpr char installDirectory[]="sdmc:/switch/NFSHP2";
-std::ofstream* languageJournal{};
+std::ostream* languageJournal{};
 using hp2::platform::Ps2Button;
 
 constexpr std::pair<HidNpadButton,Ps2Button> buttonMap[]={
@@ -72,7 +73,7 @@ hp2::EcstasyVulkanOptions graphicsOptions()
 
 class SwitchApplicationHost final:public hp2::NativeApplicationHost {
 public:
-    SwitchApplicationHost(std::ofstream& log,hp2::nx::PgoSession& profile)
+    SwitchApplicationHost(std::ostream& log,hp2::nx::PgoSession& profile)
         :log_(log),profile_(profile),graphics_(graphicsOptions())
     {
         padConfigureInput(8,HidNpadStyleSet_NpadStandard);
@@ -142,6 +143,7 @@ public:
     }
     void RecordSessionEvent(const char* event,const char* detail) noexcept override
     {
+        if constexpr(!hp2::platform::nativeDiagnosticsEnabled)return;
         if(std::strncmp(event,"render.slow_",12)==0) {
             // Keep frame logging in RAM until the existing summary flush.
             // A bounded fallback also handles a run where every frame is slow.
@@ -368,7 +370,7 @@ private:
         }
     }
 
-    std::ofstream& log_;
+    std::ostream& log_;
     hp2::nx::PgoSession& profile_;
     hp2::EcstasyVulkanDevice graphics_;
     hp2::nx::AudioDevice audio_;
@@ -395,10 +397,17 @@ int main(int argc,char** argv)
 {
     const std::filesystem::path base=installDirectory;
     const auto saves=base/"Saves";
-    std::ofstream log;
+#ifdef HP2_DISABLE_DIAGNOSTICS
+    std::ostream log(nullptr);
+#else
+    hp2::nx::AsyncLog log;
+#endif
     try {
         std::filesystem::create_directories(saves);
+#ifndef HP2_DISABLE_DIAGNOSTICS
         log.open(saves/"NFSHP2_log.txt",std::ios::trunc);
+        log<<"log.backend asynchronous queue_bytes=262144"<<std::endl;
+#endif
         auto configDirectory=base;
         if(argc>0 && argv[0] && std::filesystem::path(argv[0]).extension()==".nro" &&
             std::filesystem::path(argv[0]).has_parent_path())configDirectory=std::filesystem::path(argv[0]).parent_path();

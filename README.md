@@ -71,6 +71,11 @@ files that do not yet contain the new key. Add `test_low_quality=0` to restore
 the adaptive behavior below. Menus and paused frontend rendering retain normal
 quality. The setting is written with the other display settings on save.
 
+A separate no-log performance build is available at
+`build-nx/pgo-use-no-logs/NFSHP2.nro` (`HP2_SWITCH_DIAGNOSTICS=OFF`). It uses the
+same fixed 0.3× test profile and keeps the FPS display available. Diagnostic
+files and timing summaries are disabled in that build.
+
 Adaptive distance starts at **0.6×** and drops to **0.4×** after two consecutive
 one-second windows below 28 FPS. At **23 FPS or lower**, one measured window
 activates emergency scene quality with **0.2×** main distance and **0.25×** mirror

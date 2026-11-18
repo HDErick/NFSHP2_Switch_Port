@@ -980,7 +980,7 @@ bool ApplicationRuntime::Tick()
                         platform::ScopedNativeDuration measure(s.worldTiming,&s.slowFrame.world);
                         const double collisionBefore=s.worldProfile.collisionMs,thinkBefore=s.worldProfile.thinkingMs,
                             effectsBefore=s.worldProfile.effectsMs;
-                        const auto stepResult=worldDoTimestep(simulation,worldElapsed,&s.worldProfile);
+                        const auto stepResult=worldDoTimestep(simulation,worldElapsed,platform::nativeDiagnosticsEnabled ? &s.worldProfile:nullptr);
                         s.slowFrame.collisionMs+=s.worldProfile.collisionMs-collisionBefore;
                         s.slowFrame.thinkMs+=s.worldProfile.thinkingMs-thinkBefore;
                         s.slowFrame.effectsMs+=s.worldProfile.effectsMs-effectsBefore;
@@ -1213,7 +1213,7 @@ bool ApplicationRuntime::Tick()
         applicationPreviousGpuFrameRate=applicationGpuTimingAvailable?rate(renderTiming.gpuMilliseconds):0.0f;
     }
     const auto diagnosticsStarted=s.host.FrameTime();
-    if(hasRenderTiming) {
+    if(hasRenderTiming && platform::nativeDiagnosticsEnabled) {
         ++s.renderTimedFrames;s.renderUpdateMs+=updateMs;
         s.renderCaptureMs+=captureMs;s.renderSealMs+=sealMs;
         s.renderLogicalUpdates+=logicalUpdates;s.renderSceneCaptures+=sceneCaptures;
@@ -1438,7 +1438,7 @@ bool ApplicationRuntime::Tick()
     const auto slowCompleted=s.host.FrameTime();
     const double tailMilliseconds=std::chrono::duration<double,std::milli>(slowCompleted-tailStarted).count();
     slowTickMeasure.Finish();
-    if(hasRenderTiming && renderTiming.presentAccepted) {
+    if(hasRenderTiming && renderTiming.presentAccepted && platform::nativeDiagnosticsEnabled) {
         const double interval=s.slowLastPresent==NativeFrameTiming::Clock::time_point{} ? 0.0:
             std::chrono::duration<double,std::milli>(slowCompleted-s.slowLastPresent).count();
         char slowDetail[2304]{};
@@ -1494,6 +1494,7 @@ bool ApplicationRuntime::Tick()
             if(gpuDetail[0])s.host.RecordSessionEvent("render.slow_gpu",gpuDetail);
         }
     }
+    if constexpr(!platform::nativeDiagnosticsEnabled)s.slowFrame={};
     return !s.demo.ExitRequested();
 }
 

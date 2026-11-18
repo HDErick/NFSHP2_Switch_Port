@@ -287,3 +287,22 @@ game stutter. Rows are buffered in RAM and written with the existing five-second
 summary flush or shutdown; a roughly 64 KiB bound forces a batch write if needed.
 This avoids a file flush for every slow frame. The diagnostic logging duration
 is measured too, including a buffer-full write affecting the next interval.
+
+
+The Switch log now uses a low-priority asynchronous writer. The previous
+foreground summary flush caused measured 305 ms and 650 ms stalls, followed
+by simulation catch-up. Formatting and bounded enqueueing stay on the game
+thread; file writes and flushes run on the worker. A 256 KiB queue drops excess
+diagnostic bytes instead of waiting for a blocked SD card and reports
+`log.dropped bytes=...` when writing resumes. Shutdown drains retained records.
+`log.backend asynchronous` confirms this logger is active. This change keeps
+the fixed 0.3 test distance, normal scene quality and slow-frame measurements.
+
+
+For performance comparison, configure `HP2_SWITCH_DIAGNOSTICS=OFF`. The
+`build-nx/pgo-use-no-logs/NFSHP2.nro` build creates no NFSHP2 log file, starts
+no log writer, and omits timing summaries, slow-frame records, sampled draw
+category/shadow timing and detailed GPU pass sampling. Basic presentation/FPS
+timing, game saves/configuration and the shader cache remain functional. It
+uses the same PGO training data, fixed 0.3 testing distance and normal scene
+quality as the diagnostic build. An existing log file is left untouched.
