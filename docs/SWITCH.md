@@ -199,3 +199,35 @@ Normal frames without a history reader do not copy or split the scene pass;
 repeated prepared submissions do not advance history. FXAA retains its separate
 feedback image. Console testing is needed to confirm the visible camera result
 and measure the chase FPS change.
+
+
+## Renderer diagnostic summaries
+
+Three extra summaries are written with the existing five-second timing window:
+
+- `render.capture_detail` separates view/menu setup, background, world capture,
+  particle capture, solid chains/cars, alpha sorting/mirrors/dashboard, screen
+  effects and HUD. Times include all logical captures and are divided by the
+  number of presented frames. `emitted` counts captures that requested race
+  geometry; `discarded` counts state-only captures with geometry suppressed.
+- `render.submit_detail` separates preflight checks, swapchain acquisition,
+  completed-frame cleanup/command-buffer reset, texture retirement, target
+  setup, geometry uploads, draw-plan/transform-table construction, final
+  effects/blit/depth transfers, and command-buffer finalization. Existing
+  pipeline, command-recording and queue-submit times remain in
+  `render.detail_window`. Gather and the explicit GPU fence wait are excluded
+  from these submission phases. `other_ms` is the remaining unaccounted time.
+  `retire_capture_ms` measures CPU capture release and renderer bookkeeping
+  after queue submission, outside the existing record/submit interval.
+- `render.gather_detail` samples one submission in 32. Category times and the
+  `commands` tuple are means over sampled Gather calls, in this order: cached
+  scenery candidates, other solids (including cars), particles, world polygons,
+  UI, and screen effects. `sampled_frames=0` means no detailed category sample
+  landed in that window. Timing reads occur at category transitions rather
+  than at every strip. Vertex-job and resident-index preparation times, cold
+  job counts and cold vertex counts use all presented frames as their divisor.
+
+These are CPU wall times. Swapchain acquisition and driver calls can include
+blocking, so the GPU timestamps and explicit fence-wait metric remain necessary
+when interpreting them. No extra GPU waits, per-draw log writes or game options
+are introduced. Existing resolution, clocks, LOD and rendering behavior apply.

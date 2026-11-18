@@ -3316,6 +3316,19 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     // the GPU endpoint owns only images, dependencies and completion fences.
     Require(frame.State()==EcstasyFrame::Phase::Building && scene.clock &&
         scene.ui.resources && scene.ui.render,"eDisplayFrame lacks its live frame/UI owners");
+    using CaptureClock=std::chrono::steady_clock;
+    auto capturePhaseStarted=scene.captureProfile ? CaptureClock::now():CaptureClock::time_point{};
+    const auto captureCheckpoint=[&](std::size_t phase) {
+        if(!scene.captureProfile)return;
+        const auto now=CaptureClock::now();
+        scene.captureProfile->milliseconds[phase]+=
+            std::chrono::duration<double,std::milli>(now-capturePhaseStarted).count();
+        capturePhaseStarted=now;
+    };
+    if(scene.captureProfile) {
+        if(scene.emitRaceGeometry)++scene.captureProfile->emittedCaptures;
+        else ++scene.captureProfile->discardedCaptures;
+    }
     frame.SetPresentationAdvance(scene.advancePresentation);
     frame.CaptureDisplayOffsets(*scene.clock); // original ePutDisplayEnvironment reads both source offsets
     auto& views=scene.views;auto& render=*scene.ui.render;
@@ -3376,6 +3389,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
             frame.AttachSolidPolys();frame.AttachAlphaPolys();
         }
     };
+    captureCheckpoint(0);
     const auto* sky=scene.track ? scene.track->Sky():nullptr;
     // PAL112E38 disables Z writes for the sky packet group; PAL112F24
     // restores them after its flush. Depth testing remains enabled, so
@@ -3401,6 +3415,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     auto* scenery=scene.flow && scene.flow->inGameFlag && scene.track &&
         scene.track->trackFile && scene.track->trackFile->Loaded() ?
         scene.track->trackFile->Resources().scenery:nullptr;
+    captureCheckpoint(1);
     for(std::size_t i=1;i<10;++i) {
         auto& view=views.screens[i];if(!active(view))continue;
         // PAL113030..11304C supplies32 only to the cubemap culling far
@@ -3484,6 +3499,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         }
         scene.frontendFrame->modelDrawCpuClosureRequired=false;
     }
+    captureCheckpoint(2);
     // PAL113378/113388: separate FrameEffects and WorldEffects lists share
     // allocation pools, not live particles. Both borrow the retained catalogue.
     if(scene.emitRaceGeometry && scene.effects) {
@@ -3494,6 +3510,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
             (void)RenderWorldParticles(scene.effects->Particles(),catalogue,views.screens[i],frame);
         }
     }
+    captureCheckpoint(3);
     // PAL1134A4 calls AttachSolidPolys10BB20, not AttachAlphaPolys10B838.
     // Keep the particles/scenery alpha list pending until after car solids.
     // The scenery reflected strips read the previous mapped image; later
@@ -3526,6 +3543,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
             views.presentationLayout,true,false,false,true);
     }
     frame.AttachSolidPolys(); // PAL113714 completes the car solid chains.
+    captureCheckpoint(4);
     // PAL1137CC flushes the shared world alpha list after particles AND cars.
     // OverlayRVMImages1137F4 has its own following solid/alpha flush, before
     // DisplayRVMs later samples the completed offscreen image.
@@ -3539,6 +3557,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         RenderDashboards(views.screens[i],frame,scene.clock->worldTimeFrames);
     }
     frame.AttachSolidPolys();frame.AttachAlphaPolys();
+    captureCheckpoint(5);
     if(scene.emitRaceGeometry && scene.flow && scene.flow->inGameFlag) {
         frame.AttachFog(views);
         frame.AttachDepthOfField(views);
@@ -3551,6 +3570,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     frame.DisplayBlendPrevious(views);
     frame.SetZWriteState(1);
     if(frontend.target)frame.MarkSceneHistoryBoundary(*frontend.target);
+    captureCheckpoint(6);
     // Source113A90..113D80: effect-free HUD packets, followed by resumption
     // of the selected mode. Each packet captures its issuing render policy;
     // later Gather cannot leak the resumed scene state into these HUD draws.
@@ -3590,6 +3610,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     }
     ResumeRenderEggs();
     frame.AttachAlphaPolys();
+    captureCheckpoint(7);
     // PAL113FD8 is after every current-frame texture context. Native Gather
     // reads borrowed pixels later, so the equivalent update follows CPU capture.
     if(scene.advancePresentation && !scene.deferPresentationUpdates) {
@@ -6478,6 +6499,45 @@ struct VkDrawTarget {
     bool initialized{};
 };
 
+// Timing only contiguous category runs avoids a clock call per strip.
+// Detailed packet timing is enabled on one submission in32.
+class NativeGatherCategoryTimer {
+    using Clock=std::chrono::steady_clock;
+    EcstasyVulkanRenderProfile* profile_{};
+    std::size_t active_{6};
+    Clock::time_point started_{};
+public:
+    explicit NativeGatherCategoryTimer(EcstasyVulkanRenderProfile* profile):profile_(profile) {}
+    void Enter(const EcstasyDrawCommand& draw) {
+        if(!profile_)return;
+        const auto category=Category(draw);
+        ++profile_->gatherCategoryCommands[category];
+        if(category==active_)return;
+        const auto now=Clock::now();
+        if(active_<6)profile_->gatherCategoryMilliseconds[active_]+=
+            std::chrono::duration<double,std::milli>(now-started_).count();
+        active_=category;started_=now;
+    }
+    void Finish() {
+        if(!profile_ || active_>=6)return;
+        profile_->gatherCategoryMilliseconds[active_]+=
+            std::chrono::duration<double,std::milli>(Clock::now()-started_).count();
+        active_=6;
+    }
+    static std::size_t Category(const EcstasyDrawCommand& draw) noexcept {
+        if(draw.cachedOpaqueScenery)return 0;
+        switch(draw.kind) {
+        case EcstasyDrawKind::SolidStrip:case EcstasyDrawKind::SolidReflectionStrip:
+        case EcstasyDrawKind::SolidSpecularStrip:return 1;
+        case EcstasyDrawKind::ParticleGroup:return 2;
+        case EcstasyDrawKind::WorldPolygon:case EcstasyDrawKind::WorldStrip:return 3;
+        case EcstasyDrawKind::FlailerPolygon:case EcstasyDrawKind::RenderTargetPolygon:
+        case EcstasyDrawKind::MirrorOverlayPolygon:case EcstasyDrawKind::ScreenPolygon:return 4;
+        default:return 5;
+        }
+    }
+};
+
 struct VkDrawBatch {
     std::uint32_t first{},count{};
     bool indexed{};
@@ -8765,7 +8825,11 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         if(batch.count)appendBatch(batch);
         return true;
     };
+    const bool sampleCategories=nextSubmission%32u==0;
+    if(sampleCategories)++profile.gatherCategorySamples;
+    NativeGatherCategoryTimer categoryTimer(sampleCategories ? &profile:nullptr);
     for (const auto& draw:frame.Commands()) {
+        categoryTimer.Enter(draw);
         if(draw.kind==EcstasyDrawKind::SceneHistoryBoundary) {
             // Ordinary racing retains its single pass and does no history copy.
             if(preparedFrame.historyReaders.display) {
@@ -9248,7 +9312,9 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
                 std::chrono::duration<double,std::milli>(Clock::now()-shadowStarted).count();
         }
     }
+    categoryTimer.Finish();
     const auto finishStarted=Clock::now();
+    profile.coldVertexJobs+=nativeStripJobs.size();profile.coldVertices+=nativePendingWork;
     if(!directSourcePreparation) {
         const auto prepareJob=[&](std::size_t jobIndex) {
             const auto& job=nativeStripJobs[jobIndex];
@@ -9276,7 +9342,11 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         }
     }
     residentGeometry.CompletePreparation();
+    const auto indicesStarted=Clock::now();
+    profile.gatherVertexJobsMilliseconds+=
+        std::chrono::duration<double,std::milli>(indicesStarted-finishStarted).count();
     ResolveNativeResidentIndices(residentIndexCache,gatheredResidentIndexSpans,elementIndices,batches);
+    profile.gatherIndicesMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-indicesStarted).count();
     profile.gatherFinishMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-finishStarted).count();
 }
 
@@ -9472,6 +9542,13 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         statistics.renderProfile.shadowStrips=lastRenderProfile.shadowStrips;
         statistics.renderProfile.shadowTriangles=lastRenderProfile.shadowTriangles;
     }
+    auto submissionPhaseStarted=renderBegin;
+    const auto submissionCheckpoint=[&](EcstasySubmitPhase phase) {
+        const auto now=Clock::now();
+        statistics.renderProfile.submitPhaseMilliseconds[static_cast<std::size_t>(phase)]+=
+            milliseconds(now-submissionPhaseStarted);
+        submissionPhaseStarted=now;
+    };
     statistics.presentationTarget=swapchain!=VK_NULL_HANDLE;
     statistics.availableCpuThreads=NativeSceneEffectiveHardwareConcurrency();
     statistics.reusedPreparation=reuse;
@@ -9519,6 +9596,9 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         ++completedFrameSerial;
         completedSubmission=true;
     }
+    submissionCheckpoint(EcstasySubmitPhase::Preflight);
+    auto& preflight=statistics.renderProfile.submitPhaseMilliseconds[static_cast<std::size_t>(EcstasySubmitPhase::Preflight)];
+    preflight=std::max(0.0,preflight-statistics.gatherMilliseconds-statistics.fenceWaitMilliseconds);
     std::uint32_t swapIndex{};
     if(swapchain) {
 
@@ -9533,6 +9613,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         }
         if(acquiredResult!=VK_SUBOPTIMAL_KHR)vkRequired(acquiredResult,"vkAcquireNextImageKHR");
     }
+    submissionCheckpoint(EcstasySubmitPhase::Acquire);
     // Acquiring an obsolete swapchain can retire its depth target. Preserve
     // that cancellation before publishing samples from the completed image.
     if(completedSubmission)PublishDepthTransfers();
@@ -9544,11 +9625,13 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     // The primary is now reset and the previous real fence is complete.
     // Keep executable secondary recordings only for this unchanged plan.
     if(!reuseRecording)ResetRecordingLanes();
+    submissionCheckpoint(EcstasySubmitPhase::Reclaim);
     if(frame) {
         const bool texturesReindexed=RetireUnusedTextures(*frameTextures);
         if(prepared && texturesReindexed)RemapGatheredTextures(batches);
         preparedFrame.textureKeys=frameTextures->Get().size();
     }
+    submissionCheckpoint(EcstasySubmitPhase::Textures);
     // With no source mutation, every cached native descriptor remains live.
     // Retirement runs at the next genuine source capture, after its fence;
     // repeated submissions never dereference retained TextureInfo tokens.
@@ -9599,12 +9682,14 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
 
         }
     }
+    submissionCheckpoint(EcstasySubmitPhase::Targets);
     const auto& nextDepthTransfers=preparedFrame.depthTransfers;
     // Staging belongs to the native presenter, not to a gameplay/resource
     // owner. Reuse its capacity after each completed frame; source geometry
     // and captured draw values are rebuilt for each changed source state.
     // An unchanged presentation still records every pass and submits it.
     if(!prepared)prepare();
+    submissionPhaseStarted=Clock::now(); // Gather is already timed separately.
     if(frame) {
         preparedFrame.vertexCount=data.size();preparedFrame.glyphCount=gatheredGlyphBounds.size();
         preparedFrame.particles=statistics.particles;
@@ -9747,6 +9832,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         vkCmdPipelineBarrier(commands,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
             0,0,nullptr,count,barriers,0,nullptr);
     }
+    submissionCheckpoint(EcstasySubmitPhase::Upload);
     for(auto& list:targetDraws)list.clear();
     for(auto& list:targetDependencies)list.clear();
     for(auto& batch:batches) {
@@ -10164,10 +10250,12 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
             vkCmdWriteTimestamp(commands,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestampQueries,timestampCount++);
         }
     };
+    submissionCheckpoint(EcstasySubmitPhase::DrawPlan);
     const auto sceneRecordStarted=Clock::now();
     for(const auto id:destinations)visit(visit,id);
     statistics.renderProfile.recordSceneMilliseconds=std::max(0.0,
         milliseconds(Clock::now()-sceneRecordStarted)-statistics.renderProfile.pipelineLookupMilliseconds);
+    submissionPhaseStarted=Clock::now();
     // FXAA samples the CURRENT image through the existing history descriptor,
     // so it still needs a same-frame transfer. Ordinary race frames do not.
     // Camera history has already been captured before the HUD; FXAA uses
@@ -10231,6 +10319,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     }
     RecordDepthTransfers(nextDepthTransfers,preparedFrame.displayTranslation);
     if(timestampQueries)vkCmdWriteTimestamp(commands,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestampQueries,1);
+    submissionCheckpoint(EcstasySubmitPhase::PostProcess);
     vkRequired(vkEndCommandBuffer(commands),"vkEndCommandBuffer");
     VkSubmitInfo submission{};submission.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;submission.commandBufferCount=1;submission.pCommandBuffers=&commands;
     const VkPipelineStageFlags waitStage=VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -10239,6 +10328,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         submission.signalSemaphoreCount=1;submission.pSignalSemaphores=&presentationSemaphores[swapIndex];
     }
     vkRequired(vkResetFences(device,1,&fence),"vkResetFences");
+    submissionCheckpoint(EcstasySubmitPhase::Finalize);
     const auto queueSubmitStarted=Clock::now();
     vkRequired(vkQueueSubmit(queue,1,&submission,fence),"vkQueueSubmit");
     statistics.renderProfile.queueSubmitMilliseconds=milliseconds(Clock::now()-queueSubmitStarted);
@@ -10251,6 +10341,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     statistics.recordSubmitMilliseconds=std::max(0.0,milliseconds(Clock::now()-renderBegin)-
         statistics.gatherMilliseconds-statistics.fenceWaitMilliseconds);
 
+    const auto frameRetirementStarted=Clock::now();
     const auto journalTicks=platform::TicksNow();
     if(!journalWorkReported || journalTicks-journalWorkTicks>=platform::kTickerFrequency*5u) {
         journalWorkReported=true;journalWorkTicks=journalTicks;
@@ -10305,6 +10396,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     // CPU frame. Actual reuse/replacement still waits for its GPU fence.
     // A Gather/recording failure leaves new entries invalid for a retry.
     for(auto& texture:textures)texture.uploadCompleted=true;
+    statistics.renderProfile.frameRetirementMilliseconds=milliseconds(Clock::now()-frameRetirementStarted);
 
     if(swapchain) {
         VkPresentInfoKHR present{};present.sType=VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;

@@ -1158,6 +1158,12 @@ struct FrontendFrame;
 struct FlailerRenderManager;
 }
 
+struct EcstasySceneCaptureProfile {
+    // Setup, background, world, particles, solids, alpha/mirrors, effects, HUD.
+    std::array<double,8> milliseconds{};
+    std::uint64_t emittedCaptures{},discardedCaptures{};
+};
+
 // eDisplayFrame borrows the canonical application/track owners. The frame
 // contains submissions only; simulation, cameras and resource lifetimes
 // stay with their original owners.
@@ -1182,6 +1188,7 @@ struct EcstasySceneBindings {
     bool emitRaceGeometry{true};
     double* carCaptureMilliseconds{};
     platform::NativeDurationStatistics* sceneryCaptureTiming{};
+    EcstasySceneCaptureProfile* captureProfile{};
 };
 void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame);
 // Independent native UI overlay. It has no authored screen/debug object and
@@ -1192,7 +1199,18 @@ void EcstasyDisplayFrameRate(frontend::FlailerResources& resources,
 // CPU durations refer to the submitted frame. GPU duration refers only to
 // the explicitly identified completed submission, obtained after its fence.
 // Unsupported timestamp queues leave gpuTimeAvailable false.
+enum class EcstasySubmitPhase : std::size_t {
+    Preflight,Acquire,Reclaim,Textures,Targets,Upload,DrawPlan,PostProcess,Finalize,Count
+};
 struct EcstasyVulkanRenderProfile {
+    std::array<double,static_cast<std::size_t>(EcstasySubmitPhase::Count)> submitPhaseMilliseconds{};
+    // Scenery cache candidates, other solids, particles, world primitives, UI, effects.
+    std::array<double,6> gatherCategoryMilliseconds{};
+    std::array<std::uint64_t,6> gatherCategoryCommands{};
+    std::uint64_t gatherCategorySamples{},coldVertexJobs{},coldVertices{};
+    double gatherVertexJobsMilliseconds{},gatherIndicesMilliseconds{};
+    double frameRetirementMilliseconds{}; // After the existing record/submit interval.
+
     double gatherValidationMilliseconds{},gatherFinishMilliseconds{};
     double pipelineLookupMilliseconds{},recordSceneMilliseconds{},queueSubmitMilliseconds{};
     std::array<std::uint64_t,2> shadowStrips{},shadowTriangles{};

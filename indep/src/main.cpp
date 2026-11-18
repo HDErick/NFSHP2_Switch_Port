@@ -235,6 +235,7 @@ struct ApplicationRuntime::Storage {
     double renderCarCaptureMs{};
     std::array<double,2> renderShadowCaptureMs{};
     EcstasyVulkanRenderProfile renderProfile{};
+    EcstasySceneCaptureProfile captureProfile{};
     EcstasyVulkanGpuProfile renderGpuProfile{};
     std::uint64_t renderGpuProfileSamples{};
     WorldStepProfile worldProfile{};
@@ -1103,6 +1104,7 @@ bool ApplicationRuntime::Tick()
         scene.environmentMap=s.environmentMap.get();scene.effects=&s.resources->FX();
         scene.carCaptureMilliseconds=&s.renderCarCaptureMs;
         scene.sceneryCaptureTiming=&s.sceneryTiming;
+        scene.captureProfile=&s.captureProfile;
         scene.advancePresentation=advancedPresentation;scene.deferPresentationUpdates=true;
         if(advancedPresentation) {
             s.simulationClock.CompleteStep(s.scheduledStepQuanta);
@@ -1206,6 +1208,17 @@ bool ApplicationRuntime::Tick()
         s.renderProfile.recordSceneMilliseconds+=profile.recordSceneMilliseconds;
         s.renderProfile.queueSubmitMilliseconds+=profile.queueSubmitMilliseconds;
         s.renderProfile.shadowGatherSamples+=profile.shadowGatherSamples;
+        for(std::size_t i=0;i<profile.submitPhaseMilliseconds.size();++i)
+            s.renderProfile.submitPhaseMilliseconds[i]+=profile.submitPhaseMilliseconds[i];
+        for(std::size_t i=0;i<profile.gatherCategoryMilliseconds.size();++i) {
+            s.renderProfile.gatherCategoryMilliseconds[i]+=profile.gatherCategoryMilliseconds[i];
+            s.renderProfile.gatherCategoryCommands[i]+=profile.gatherCategoryCommands[i];
+        }
+        s.renderProfile.gatherCategorySamples+=profile.gatherCategorySamples;
+        s.renderProfile.coldVertexJobs+=profile.coldVertexJobs;s.renderProfile.coldVertices+=profile.coldVertices;
+        s.renderProfile.gatherVertexJobsMilliseconds+=profile.gatherVertexJobsMilliseconds;
+        s.renderProfile.gatherIndicesMilliseconds+=profile.gatherIndicesMilliseconds;
+        s.renderProfile.frameRetirementMilliseconds+=profile.frameRetirementMilliseconds;
         for(std::size_t shadow=0;shadow<profile.shadowStrips.size();++shadow) {
             s.renderProfile.shadowStrips[shadow]+=profile.shadowStrips[shadow];
             s.renderProfile.shadowTriangles[shadow]+=profile.shadowTriangles[shadow];
@@ -1305,6 +1318,44 @@ bool ApplicationRuntime::Tick()
                 cpu.recordSceneMilliseconds/count,cpu.queueSubmitMilliseconds/count,
                 std::max(0.0,s.renderSubmitMs-cpu.pipelineLookupMilliseconds-cpu.recordSceneMilliseconds-cpu.queueSubmitMilliseconds)/count);
             s.host.RecordSessionEvent("render.detail_window",detail);
+            const auto& capture=s.captureProfile;
+            std::snprintf(detail,sizeof(detail),
+                "scenario=%d fps=%.2f setup_ms=%.3f background_ms=%.3f world_ms=%.3f particles_ms=%.3f "
+                "solids_ms=%.3f alpha_mirrors_ms=%.3f effects_ms=%.3f hud_ms=%.3f emitted=%llu discarded=%llu",
+                s.parameters.selectedScenario,1000.0*count/windowMilliseconds,
+                capture.milliseconds[0]/count,capture.milliseconds[1]/count,
+                capture.milliseconds[2]/count,capture.milliseconds[3]/count,
+                capture.milliseconds[4]/count,capture.milliseconds[5]/count,
+                capture.milliseconds[6]/count,capture.milliseconds[7]/count,
+                static_cast<unsigned long long>(capture.emittedCaptures),
+                static_cast<unsigned long long>(capture.discardedCaptures));
+            s.host.RecordSessionEvent("render.capture_detail",detail);
+            const auto& phases=cpu.submitPhaseMilliseconds;
+            double accounted=cpu.pipelineLookupMilliseconds+cpu.recordSceneMilliseconds+cpu.queueSubmitMilliseconds;
+            for(const auto phase:phases)accounted+=phase;
+            std::snprintf(detail,sizeof(detail),
+                "scenario=%d fps=%.2f preflight_ms=%.3f acquire_ms=%.3f reclaim_ms=%.3f textures_ms=%.3f "
+                "targets_ms=%.3f upload_ms=%.3f draw_plan_ms=%.3f postprocess_ms=%.3f finalize_ms=%.3f other_ms=%.3f retire_capture_ms=%.3f",
+                s.parameters.selectedScenario,1000.0*count/windowMilliseconds,
+                phases[0]/count,phases[1]/count,phases[2]/count,phases[3]/count,phases[4]/count,
+                phases[5]/count,phases[6]/count,phases[7]/count,phases[8]/count,
+                std::max(0.0,s.renderSubmitMs-accounted)/count,cpu.frameRetirementMilliseconds/count);
+            s.host.RecordSessionEvent("render.submit_detail",detail);
+            const auto categorySamples=static_cast<double>(std::max<std::uint64_t>(1,cpu.gatherCategorySamples));
+            const auto& category=cpu.gatherCategoryMilliseconds;
+            const auto& commands=cpu.gatherCategoryCommands;
+            std::snprintf(detail,sizeof(detail),
+                "scenario=%d sampled_frames=%llu sample_stride=32 scenery_ms=%.3f solids_ms=%.3f particles_ms=%.3f "
+                "world_ms=%.3f ui_ms=%.3f effects_ms=%.3f commands=(%.0f,%.0f,%.0f,%.0f,%.0f,%.0f) "
+                "vertex_jobs_ms=%.3f resident_indices_ms=%.3f cold_jobs=%.1f cold_vertices=%.1f",
+                s.parameters.selectedScenario,static_cast<unsigned long long>(cpu.gatherCategorySamples),
+                category[0]/categorySamples,category[1]/categorySamples,category[2]/categorySamples,
+                category[3]/categorySamples,category[4]/categorySamples,category[5]/categorySamples,
+                commands[0]/categorySamples,commands[1]/categorySamples,commands[2]/categorySamples,
+                commands[3]/categorySamples,commands[4]/categorySamples,commands[5]/categorySamples,
+                cpu.gatherVertexJobsMilliseconds/count,cpu.gatherIndicesMilliseconds/count,
+                cpu.coldVertexJobs/count,cpu.coldVertices/count);
+            s.host.RecordSessionEvent("render.gather_detail",detail);
             if(s.renderGpuProfileSamples) {
                 const auto samples=static_cast<double>(s.renderGpuProfileSamples);
                 const auto& gpu=s.renderGpuProfile;
@@ -1316,7 +1367,7 @@ bool ApplicationRuntime::Tick()
                     gpu.auxMilliseconds/samples,gpu.tailMilliseconds/samples);
                 s.host.RecordSessionEvent("render.gpu_pass_window",detail);
             }
-            s.renderShadowCaptureMs={};s.renderProfile={};s.renderGpuProfile={};s.renderGpuProfileSamples=0;
+            s.renderShadowCaptureMs={};s.renderProfile={};s.captureProfile={};s.renderGpuProfile={};s.renderGpuProfileSamples=0;
             s.worldProfile={};s.worldTiming={};s.audioTiming={};s.inputTiming={};
             s.resourceTiming={};s.sceneryTiming={};
             s.presentsOver33ms=0;s.presentsOver50ms=0;s.longestPresentIntervalMs=0.0;
